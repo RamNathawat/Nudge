@@ -1,0 +1,28 @@
+# Python-specific ignores
+__pycache__/
+*.pyc
+*.pyd
+.python-version
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# Node.js-specific ignores
+node_modules/
+package-lock.json
+npm-debug.log*
+yarn-error.log*
+.env # Be very careful about ignoring this if it contains sensitive production keys!
+
+# OS or editor-specific files
+.DS_Store
+.vscode/
+*.swp
+*.swo
+
+# Log files or temporary files
+*.log
+tmp/
+temp/
