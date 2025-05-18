@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 
+
 function Chat() {
   const [messages, setMessages] = useState([
     { sender: "ai", text: "Hey! 😊 I'm Nudge. What's on your mind?", timestamp: new Date() },
@@ -62,6 +63,8 @@ function Chat() {
 
   const formatTime = (date) =>
     date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  
+
 
   return (
     <div

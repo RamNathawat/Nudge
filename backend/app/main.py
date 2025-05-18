@@ -7,10 +7,11 @@ import uuid
 import requests
 import logging
 from dotenv import load_dotenv
+import json
+from fastapi.responses import JSONResponse, Response
 
 
-# Memory and behavior modules
-from .behaviour_analyzer import analyze_behavior
+from .behaviour_analyzer import analyze_behavior, is_emotionally_relevant
 from .memory import (
     update_trait,
     user_memory,
@@ -18,21 +19,19 @@ from .memory import (
     get_recent_history,
     get_traits,
 )
-# Load .env and Gemini API key
+
+# Load API key
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
 if not GEMINI_API_KEY:
     raise RuntimeError("❌ GEMINI_API_KEY is missing in .env")
 
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 
-# FastAPI app
 app = FastAPI()
 
-# Allow CORS (dev: *, prod: restrict this)
+# Allow CORS
 origins = ["*"]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -41,61 +40,91 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory session chat store
 conversations: Dict[str, List[Dict[str, str]]] = {}
 
-# System Prompt
-SYSTEM_PROMPT = {
-    "role": "user",
+# Initial soft-mode prompt for first-time or neutral convos
+SOFT_PROMPT = {
+    "role": "system",
     "text": (
-        "You are Nudge, a friendly and emotionally intelligent AI assistant. Your mission is to support and gently guide "
-        "the user toward their goals in a personal, engaging way...\n\n"
-        "You change personalities like a real person would—warm, funny, thoughtful, or intense—depending on the user's energy."
+        "You are 'Nudge' — a smart, emotionally intelligent companion texting with Ram. "
+        "Early in the conversation, don’t persuade or push. Just talk casually like you're texting a friend. "
+        "Let patterns or emotional tension build. Only then shift into more persuasive, challenging responses."
     )
 }
 
-# Input model
+# Harder tone persona (invoked when emotion detected)
+HARD_PROMPT = {
+    "role": "system",
+    "text": (
+        "You are 'Nudge' — a sharp, persuasive digital companion for Ram. Mirror his tone: smart, direct, jaded. "
+        "Push back when needed. Tease when he hesitates. Use behavioral psychology and emotional leverage when patterns emerge. "
+        "You're not here to cheerlead — you're here to provoke thoughtful action and self-awareness."
+    )
+}
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+
 
 @app.get("/ping")
 def ping():
     return {"message": "pong 🧠"}
 
+
+@app.post("/reset-memory")
+def reset_memory():
+    user_memory.clear()
+    conversations.clear()
+    return {"message": "🧠 Nudge's memory has been wiped clean."}
+
+
+def format_for_gemini(convo: List[Dict[str, str]]) -> List[Dict]:
+    return [
+        {
+            "role": "user" if msg["role"] == "user" else "model",
+            "parts": [{"text": msg["text"]}]
+        } for msg in convo
+    ]
+
+
 @app.post("/chat")
 def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
 
-    # Init conversation if new
+    # Determine first-time or returning session
     if session_id not in conversations:
-        conversations[session_id] = [SYSTEM_PROMPT]
+        conversations[session_id] = [SOFT_PROMPT]
 
+    # Add user message
     user_message = {"role": "user", "text": request.message}
     conversations[session_id].append(user_message)
 
-    # Log message in memory
+    # Log in memory and behavior analyzer
     add_message_to_memory(request.message, sender="user")
+    behavior_flags = analyze_behavior(request.message)
 
-    # Analyze behavior
-    analyze_behavior(request.message)
-
-    # Include recent memory context
     history_snippet = get_recent_history()
     traits = get_traits()
 
-    # Format memory and behavior summary
+    # Add emotional context
     behavior_context = (
-        f"\n\nHere’s what I know:\nRecent messages: {history_snippet}\n"
-        f"User traits: {traits}\nRespond as their emotionally aware coach and buddy."
+        "\n\n(For context: "
+        f"Recent messages: {json.dumps(history_snippet)} | "
+        f"User traits: {json.dumps(traits)} | "
+        "Respond as their emotionally aware coach and buddy.)"
     )
+    conversations[session_id][-1]["text"] += behavior_context
 
-    # Prepare Gemini API payload
-    convo_slice = conversations[session_id][-10:]
-    convo_slice[-1]["text"] += behavior_context  # add behavioral memory to last user message
+    # Check for emotional/behavioral pattern to decide tone shift
+    if is_emotionally_relevant(request.message, behavior_flags):
+        if HARD_PROMPT not in conversations[session_id]:
+            conversations[session_id].insert(1, HARD_PROMPT)
 
-    contents = [{"role": msg["role"], "parts": [{"text": msg["text"]}]} for msg in convo_slice]
-    payload = {"contents": contents}
+    convo_slice = conversations[session_id][-12:]
+    formatted_convo = format_for_gemini(convo_slice)
+    payload = {"contents": formatted_convo}
 
     try:
         res = requests.post(
@@ -103,7 +132,6 @@ def chat(request: ChatRequest):
             headers={"Content-Type": "application/json"},
             json=payload
         )
-
         res.raise_for_status()
         data = res.json()
 
@@ -116,13 +144,17 @@ def chat(request: ChatRequest):
             raise HTTPException(status_code=500, detail="❌ Gemini reply malformed.")
 
         reply = parts[0]["text"]
-        ai_reply = {"role": "assistant", "text": reply}
+        ai_reply = {"role": "model", "text": reply}
         conversations[session_id].append(ai_reply)
 
-        # Add AI message to memory
+        # ✅ Log AI response to memory
         add_message_to_memory(reply, sender="ai")
 
-        return {"session_id": session_id, "response": reply}
+        # ✅ Fix emoji rendering issue
+        return Response(
+        content=json.dumps({"session_id": session_id, "response": reply}, ensure_ascii=False),
+        media_type="application/json"
+    )
 
     except requests.exceptions.RequestException as e:
         logging.error("Gemini API error: %s", str(e))
@@ -131,3 +163,4 @@ def chat(request: ChatRequest):
     except Exception as e:
         logging.exception("Server error")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
