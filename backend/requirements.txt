@@ -11,3 +11,8 @@ starlette==0.46.2
 typing-inspection==0.4.0
 typing_extensions==4.13.2
 uvicorn==0.34.2
+
+# ✅ Missing/essential packages
+requests==2.31.0
+python-dotenv==1.0.1
+httpx==0.27.0
