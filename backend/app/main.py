@@ -64,8 +64,8 @@ class ChatRequest(BaseModel):
 
 # === API Routes ===
 @app.get("/ping")
-def ping():
-    return {"message": "pong 🧠"}
+def root():
+    return {"message": "Nudge backend is working!"}
 
 @app.post("/reset-memory")
 def reset_memory():
