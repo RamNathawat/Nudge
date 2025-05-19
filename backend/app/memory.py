@@ -24,6 +24,15 @@ if "common_excuses" not in traits:
 if "procrastination_level" not in traits:
     traits["procrastination_level"] = 0
 
+# ✅ Ensure emotional_state exists
+if "emotional_state" not in user_memory or not isinstance(user_memory["emotional_state"], dict):
+    user_memory["emotional_state"] = {
+        "mood": "neutral",
+        "substance": None,
+        "energy": None,
+        "intent": None
+    }
+
 
 def add_message_to_memory(message, sender):
     user_memory["history"].append({"sender": sender, "text": message})
@@ -46,3 +55,24 @@ def update_trait(trait, value):
 
 def get_traits():
     return user_memory["traits"]
+
+
+# ✅ New functions: Emotional State
+def update_emotional_state(mood=None, substance=None, energy=None, intent=None):
+    if "emotional_state" not in user_memory:
+        user_memory["emotional_state"] = {}
+    
+    if mood:
+        user_memory["emotional_state"]["mood"] = mood
+    if substance:
+        user_memory["emotional_state"]["substance"] = substance
+    if energy:
+        user_memory["emotional_state"]["energy"] = energy
+    if intent:
+        user_memory["emotional_state"]["intent"] = intent
+
+    save_memory(user_memory)
+
+
+def get_emotional_state():
+    return user_memory.get("emotional_state", {})

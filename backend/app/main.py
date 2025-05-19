@@ -1,17 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-import os
-import uuid
-import requests
-import logging
+import os, uuid, requests, json, logging
 from dotenv import load_dotenv
-import json
-from fastapi.responses import JSONResponse, Response
-
 
 from .behaviour_analyzer import analyze_behavior, is_emotionally_relevant
+from .state_inference import infer_emotional_state, summary_emotions
 from .memory import (
     update_trait,
     user_memory,
@@ -20,7 +16,7 @@ from .memory import (
     get_traits,
 )
 
-# Load API key
+# === Environment Setup ===
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
@@ -28,21 +24,21 @@ if not GEMINI_API_KEY:
 
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 
+# === FastAPI App Initialization ===
 app = FastAPI()
-
-# Allow CORS
-origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# === Global State ===
 conversations: Dict[str, List[Dict[str, str]]] = {}
 
-# Initial soft-mode prompt for first-time or neutral convos
+# === Chat Tone Personas ===
+
 SOFT_PROMPT = {
     "role": "system",
     "text": (
@@ -63,11 +59,13 @@ HARD_PROMPT = {
 }
 
 
+# === Request Schema ===
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
 
 
+# === API Routes ===
 @app.get("/ping")
 def ping():
     return {"message": "pong 🧠"}
@@ -80,6 +78,7 @@ def reset_memory():
     return {"message": "🧠 Nudge's memory has been wiped clean."}
 
 
+# === Helper Functions ===
 def format_for_gemini(convo: List[Dict[str, str]]) -> List[Dict]:
     return [
         {
@@ -89,42 +88,50 @@ def format_for_gemini(convo: List[Dict[str, str]]) -> List[Dict]:
     ]
 
 
+def inject_emotional_context(message: str):
+    behavior_flags = analyze_behavior(message)
+    emotional_state = infer_emotional_state(message)
+    summarized_state_str = summary_emotions(emotional_state)  # returns a string summary
+
+    # Update memory traits using the actual dict
+    for trait, value in emotional_state.items():
+        update_trait(trait, value)
+
+    # Format context
+    return (
+        f"\n\n(Recent behavior: {json.dumps(get_recent_history())} | "
+        f"Traits: {json.dumps(get_traits())} | "
+        f"Inferred emotions: {summarized_state_str})",
+        behavior_flags,
+        emotional_state,  # returning the real dict
+    )
+
+
+
+# === Main Chat Endpoint ===
 @app.post("/chat")
 def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
+    conversations.setdefault(session_id, [SOFT_PROMPT])
 
-    # Determine first-time or returning session
-    if session_id not in conversations:
-        conversations[session_id] = [SOFT_PROMPT]
+    user_text = request.message.strip()
+    user_msg = {"role": "user", "text": user_text}
 
-    # Add user message
-    user_message = {"role": "user", "text": request.message}
-    conversations[session_id].append(user_message)
+    # Log input
+    add_message_to_memory(user_text, sender="user")
 
-    # Log in memory and behavior analyzer
-    add_message_to_memory(request.message, sender="user")
-    behavior_flags = analyze_behavior(request.message)
+    # Analyze emotional context
+    context_addition, flags, emotions = inject_emotional_context(user_text)
+    user_msg["text"] += context_addition
+    conversations[session_id].append(user_msg)
 
-    history_snippet = get_recent_history()
-    traits = get_traits()
+    # Decide tone shift
+    if is_emotionally_relevant(user_text, flags) and HARD_PROMPT not in conversations[session_id]:
+        conversations[session_id].insert(1, HARD_PROMPT)
 
-    # Add emotional context
-    behavior_context = (
-        "\n\n(For context: "
-        f"Recent messages: {json.dumps(history_snippet)} | "
-        f"User traits: {json.dumps(traits)} | "
-        "Respond as their emotionally aware coach and buddy.)"
-    )
-    conversations[session_id][-1]["text"] += behavior_context
-
-    # Check for emotional/behavioral pattern to decide tone shift
-    if is_emotionally_relevant(request.message, behavior_flags):
-        if HARD_PROMPT not in conversations[session_id]:
-            conversations[session_id].insert(1, HARD_PROMPT)
-
+    # Build request to Gemini
     convo_slice = conversations[session_id][-12:]
-    formatted_convo = format_for_gemini(convo_slice)
-    payload = {"contents": formatted_convo}
+    payload = {"contents": format_for_gemini(convo_slice)}
 
     try:
         res = requests.post(
@@ -143,24 +150,23 @@ def chat(request: ChatRequest):
         if not parts or not parts[0].get("text"):
             raise HTTPException(status_code=500, detail="❌ Gemini reply malformed.")
 
-        reply = parts[0]["text"]
-        ai_reply = {"role": "model", "text": reply}
-        conversations[session_id].append(ai_reply)
+        reply_text = parts[0]["text"]
+        conversations[session_id].append({"role": "model", "text": reply_text})
+        add_message_to_memory(reply_text, sender="ai")
 
-        # ✅ Log AI response to memory
-        add_message_to_memory(reply, sender="ai")
-
-        # ✅ Fix emoji rendering issue
         return Response(
-        content=json.dumps({"session_id": session_id, "response": reply}, ensure_ascii=False),
-        media_type="application/json"
-    )
+            content=json.dumps({
+                "session_id": session_id,
+                "response": reply_text,
+                "emotions": emotions
+            }, ensure_ascii=False),
+            media_type="application/json"
+        )
 
     except requests.exceptions.RequestException as e:
         logging.error("Gemini API error: %s", str(e))
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
 
     except Exception as e:
-        logging.exception("Server error")
+        logging.exception("Unhandled server error")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-
