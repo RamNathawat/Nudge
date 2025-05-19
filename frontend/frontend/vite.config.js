@@ -7,7 +7,8 @@ export default defineConfig({
   server: {
     allowedHosts: [
       'localhost',
-      'nudgedemo.loca.lt'
+      'nudgedemo.loca.lt',
+      '3466-103-59-75-40.ngrok-free.app'
     ]
   }
 })
