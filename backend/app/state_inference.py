@@ -1,55 +1,38 @@
 import re
-
-# Sample keywords for inference (can be replaced with NLP model later)
-MOOD_KEYWORDS = {
-    "happy": ["great", "happy", "awesome", "excited", "joyful", "love"],
-    "sad": ["sad", "depressed", "down", "lonely", "miserable"],
-    "angry": ["angry", "mad", "furious", "pissed", "annoyed"],
-    "anxious": ["anxious", "worried", "stressed", "nervous"],
-    "neutral": ["okay", "fine", "meh", "alright"],
-}
-
-ENERGY_KEYWORDS = {
-    "high": ["energized", "hyped", "buzzing", "motivated"],
-    "low": ["tired", "exhausted", "sleepy", "drained", "lethargic"],
-    "moderate": ["normal", "balanced", "calm"]
-}
+from typing import Dict
+from app.task_topic_inference import infer_task_topic
 
 INTENT_KEYWORDS = {
-    "productive": ["focus", "work", "study", "grind", "create"],
-    "avoidant": ["avoid", "skip", "postpone", "later"],
-    "recreational": ["chill", "watch", "relax", "vibe"]
+    "productive": ["build", "create", "focus", "learn", "improve", "study"],
+    "avoidant": ["skip", "delay", "procrastinate", "later"],
+    "recreational": ["relax", "chill", "watch", "hangout"]
 }
 
 SUBSTANCE_KEYWORDS = {
-    "weed": ["high", "stoned", "blazed", "420"],
-    "alcohol": ["drunk", "buzzed", "wasted"],
-    "nicotine": ["smoked", "vape", "cigarette"],
+    "weed": ["high", "stoned", "smoke weed"],
+    "alcohol": ["drunk", "booze", "wine", "beer"],
+    "nicotine": ["cigarette", "vape", "nicotine", "smoke"]
 }
 
-
-def infer_from_keywords(text: str, keyword_dict: dict, default: str):
+def infer_from_keywords(text: str, keyword_map: Dict[str, list], default: str = "unknown") -> str:
     text = text.lower()
-    for category, keywords in keyword_dict.items():
+    for category, keywords in keyword_map.items():
         if any(re.search(rf"\b{kw}\b", text) for kw in keywords):
             return category
     return default
 
-
-def infer_emotional_state(message: str) -> dict:
+def infer_emotional_state() -> Dict[str, str]:
     return {
-        "mood": infer_from_keywords(message, MOOD_KEYWORDS, "neutral"),
-        "energy": infer_from_keywords(message, ENERGY_KEYWORDS, "moderate"),
-        "intent": infer_from_keywords(message, INTENT_KEYWORDS, "productive"),
-        "substance": infer_from_keywords(message, SUBSTANCE_KEYWORDS, None),
+        "calm": "Your tone seems relaxed and neutral.",
+        "stressed": "You sound overwhelmed or agitated.",
+        "motivated": "You're clearly ready to take action.",
+        "apathetic": "You don't seem too interested in doing much.",
+        "anxious": "You're overthinking or unsure about something."
     }
 
-
-def summary_emotions(emotions: dict) -> str:
-    summary = []
-    for trait, value in emotions.items():
-        if value:
-            summary.append(f"{trait}: {value}")
-    return " | ".join(summary)
-
-
+def infer_user_state(message: str) -> Dict[str, str]:
+    return {
+        "intent": infer_from_keywords(message, INTENT_KEYWORDS),
+        "substance": infer_from_keywords(message, SUBSTANCE_KEYWORDS),
+        "task_topic": infer_task_topic(message)
+    }

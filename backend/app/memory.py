@@ -1,78 +1,76 @@
-from .storage import save_memory, load_memory
+import json
+from datetime import datetime, timedelta
+from .models import MemoryEntry
+from .nlp_analysis import extract_topic_tags, estimate_emotion
 
-# Load saved memory or initialize defaults safely
-user_memory = load_memory()
+MEMORY_FILE = "user_memory.json"
+MEMORY_DECAY_DAYS = 15  # How long before memory starts fading
 
-# Ensure user_memory is a dictionary
-if not isinstance(user_memory, dict):
-    user_memory = {}
+def load_memory():
+    try:
+        with open(MEMORY_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-# Ensure history exists
-if "history" not in user_memory or not isinstance(user_memory["history"], list):
-    user_memory["history"] = []
+def save_memory(memory):
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(memory, f, indent=2, default=str)
 
-# Ensure traits exist and have all required fields
-if "traits" not in user_memory or not isinstance(user_memory["traits"], dict):
-    user_memory["traits"] = {}
+def add_to_memory(user_id, message, task_reference=None):
+    memory = load_memory()
 
-traits = user_memory["traits"]
+    emotion, intensity = estimate_emotion(message)
+    topic_tags = extract_topic_tags(message)
 
-if "mood" not in traits:
-    traits["mood"] = "neutral"
-if "common_excuses" not in traits:
-    traits["common_excuses"] = []
-if "procrastination_level" not in traits:
-    traits["procrastination_level"] = 0
+    timestamp = datetime.now()
+    salience = compute_salience(emotion, intensity, message, topic_tags)
+    repetition_score = compute_repetition_score(user_id, message)
 
-# ✅ Ensure emotional_state exists
-if "emotional_state" not in user_memory or not isinstance(user_memory["emotional_state"], dict):
-    user_memory["emotional_state"] = {
-        "mood": "neutral",
-        "substance": None,
-        "energy": None,
-        "intent": None
-    }
+    new_entry = MemoryEntry(
+        user_id=user_id,
+        content=message,
+        emotion=emotion,
+        emotional_intensity=intensity,
+        timestamp=timestamp,
+        salience=salience,
+        repetition_score=repetition_score,
+        topic_tags=topic_tags,
+        task_reference=task_reference
+    ).dict()
 
+    memory.setdefault(user_id, []).append(new_entry)
+    save_memory(memory)
 
-def add_message_to_memory(message, sender):
-    user_memory["history"].append({"sender": sender, "text": message})
+def compute_salience(emotion, intensity, message, tags):
+    base = len(message) / 50  # longer = more salient
+    emotional_bonus = intensity * 2
+    topic_bonus = 0.2 * len(tags)
+    return round(base + emotional_bonus + topic_bonus, 2)
 
-    # Optional: Limit memory size
-    if len(user_memory["history"]) > 100:
-        user_memory["history"] = user_memory["history"][-100:]
+def compute_repetition_score(user_id, new_message):
+    memory = load_memory().get(user_id, [])
+    count = sum(1 for m in memory if new_message.strip().lower() in m['content'].strip().lower())
+    return round(min(count / 5, 1.0), 2)
 
-    save_memory(user_memory)
+def get_relevant_memory(user_id):
+    memory = load_memory().get(user_id, [])
+    relevant = []
+    now = datetime.now()
 
+    for entry in memory:
+        entry_time = datetime.fromisoformat(entry["timestamp"])
+        days_old = (now - entry_time).days
+        decay = max(0.0, 1.0 - days_old / MEMORY_DECAY_DAYS)
 
-def get_recent_history():
-    return user_memory["history"][-10:]
+        weight = (
+            entry["salience"] * 0.4 +
+            entry["emotional_intensity"] * 0.4 +
+            entry["repetition_score"] * 0.2
+        ) * decay
 
+        if weight > 0.25:
+            relevant.append((weight, entry))
 
-def update_trait(trait, value):
-    user_memory["traits"][trait] = value
-    save_memory(user_memory)
-
-
-def get_traits():
-    return user_memory["traits"]
-
-
-# ✅ New functions: Emotional State
-def update_emotional_state(mood=None, substance=None, energy=None, intent=None):
-    if "emotional_state" not in user_memory:
-        user_memory["emotional_state"] = {}
-    
-    if mood:
-        user_memory["emotional_state"]["mood"] = mood
-    if substance:
-        user_memory["emotional_state"]["substance"] = substance
-    if energy:
-        user_memory["emotional_state"]["energy"] = energy
-    if intent:
-        user_memory["emotional_state"]["intent"] = intent
-
-    save_memory(user_memory)
-
-
-def get_emotional_state():
-    return user_memory.get("emotional_state", {})
+    relevant.sort(key=lambda x: x[0], reverse=True)
+    return [e for _, e in relevant]

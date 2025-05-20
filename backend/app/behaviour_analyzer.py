@@ -1,62 +1,110 @@
 import re
+from typing import Optional, Dict, List
 from .memory import update_trait, user_memory
-from .nlp_analysis import detect_emotion  # Uses transformer-based emotion detection
+from .nlp_analysis import detect_emotion
 
+# -------------------------
+# Configurable Pattern Sets
+# -------------------------
 
-def analyze_behavior(message: str) -> str:
-    message = message.lower()
+COMMON_EXCUSES = [
+    "i'll do it later", "i'm tired", "maybe tomorrow", "not in the mood", 
+    "i'm lazy", "i’m overwhelmed", "i don’t feel ready"
+]
 
-    # === Excuses Detection ===
-    excuses = [
-        "i'll do it later",
-        "i'm tired",
-        "maybe tomorrow",
-        "not in the mood",
-        "i’m lazy"
-    ]
-    for excuse in excuses:
-        if excuse in message and excuse not in user_memory["traits"]["common_excuses"]:
+PROCRASTINATION_PATTERNS = [
+    r"\b(i'?ll|i will)?\s*do it\s*(later|tomorrow|next time|soon)\b",
+    r"\b(can|could|might)?\s*do\s*(this|that|it)?\s*(tomorrow|later)\b"
+]
+
+EMOTIONAL_FLAGS = {
+    "stuck": "user_feels_stuck",
+    "broke my promise": "user_broke_promise",
+    "ashamed": "user_expresses_shame",
+    "shame": "user_expresses_shame",
+    "exhausted": "user_expresses_exhaustion",
+    "hopeless": "user_expresses_hopelessness"
+}
+
+RESISTANCE_KEYWORDS = [
+    "stop", "leave me alone", "this isn't working", "i don't care", 
+    "shut up", "you're annoying", "you're not helping", 
+    "why do you keep pushing", "let me be"
+]
+
+# -------------------------
+# Main Behavior Analyzer
+# -------------------------
+
+def analyze_behavior(message: str) -> Optional[str]:
+    """
+    Analyzes user message for behavioral patterns like procrastination, emotional struggle, excuses, or resistance.
+    Updates user memory and traits. Returns the detected emotional mood.
+    """
+    lowered_msg = message.lower()
+
+    # === Excuse Detection ===
+    for excuse in COMMON_EXCUSES:
+        if excuse in lowered_msg and excuse not in user_memory["traits"]["common_excuses"]:
             user_memory["traits"]["common_excuses"].append(excuse)
 
     # === Procrastination Detection ===
-    if re.search(r"\b(do it (later|tomorrow|next time))\b", message):
-        user_memory["traits"]["procrastination_level"] += 1
+    for pattern in PROCRASTINATION_PATTERNS:
+        if re.search(pattern, lowered_msg):
+            user_memory["traits"]["procrastination_level"] += 1
+            break
 
-    # === NLP-powered Mood Detection ===
-    emotion = detect_emotion(message)  # e.g., "joy", "sadness", "anger", etc.
-    update_trait("mood", emotion)
+    # === Emotional Trait Flags ===
+    for phrase, trait_key in EMOTIONAL_FLAGS.items():
+        if phrase in lowered_msg:
+            user_memory["traits"][trait_key] = True
 
-    return emotion  # Return for use in chat flow
+    # === Resistance Detection ===
+    if detect_resistance(lowered_msg):
+        user_memory["traits"]["retreat_count"] += 1
 
+    # === NLP Mood Detection ===
+    try:
+        emotion = detect_emotion(message)
+        update_trait("mood", emotion)
+    except Exception:
+        emotion = "neutral"  # fallback
 
-def is_emotionally_relevant(message: str, emotion: str) -> bool:
+    return emotion
+
+# -------------------------
+# Resistance Detection Logic
+# -------------------------
+
+def detect_resistance(message: str) -> bool:
     """
-    Decide whether the message contains emotional or behavioral cues
-    that warrant a switch to persuasive/dark nudging mode.
+    Checks for pushback or emotional resistance indicating the user is not receptive.
+    Updates `retreat_count` if resistance is found.
     """
+    return any(keyword in message for keyword in RESISTANCE_KEYWORDS)
 
-    # Emotional trigger words or states
-    negative_emotions = {"sadness", "anger", "fear", "disgust", "frustration", "shame"}
-    behavior_flags = user_memory["traits"]
+# -------------------------
+# Explainable Debug Output (Optional)
+# -------------------------
 
-    # Trigger conditions
-    has_negative_emotion = emotion in negative_emotions
-    has_repeated_procrastination = behavior_flags["procrastination_level"] >= 2
-    made_multiple_excuses = len(behavior_flags["common_excuses"]) >= 2
+def explain_behavior_analysis(message: str) -> Dict:
+    """
+    Returns an explainable dictionary of what was detected for debugging or AI monitoring.
+    """
+    lowered_msg = message.lower()
 
-    return has_negative_emotion or has_repeated_procrastination or made_multiple_excuses
-
-
-if __name__ == "__main__":
-    test_msgs = [
-        "I'll do it later",
-        "I'm super excited about this!",
-        "Not in the mood today",
-        "Maybe tomorrow",
-        "I'm really angry at everything"
-    ]
-
-    for msg in test_msgs:
-        detected_emotion = analyze_behavior(msg)
-        relevance = is_emotionally_relevant(msg, detected_emotion)
-        print(f"[{msg}] → Emotion: {detected_emotion}, Trigger Persuasion? {relevance}")
+    return {
+        "input": message,
+        "detected_excuses": [
+            excuse for excuse in COMMON_EXCUSES if excuse in lowered_msg
+        ],
+        "procrastination_patterns_matched": [
+            pattern for pattern in PROCRASTINATION_PATTERNS if re.search(pattern, lowered_msg)
+        ],
+        "emotional_flags_raised": [
+            trait for phrase, trait in EMOTIONAL_FLAGS.items() if phrase in lowered_msg
+        ],
+        "resistance_detected": detect_resistance(lowered_msg),
+        "retreat_count": user_memory["traits"].get("retreat_count", 0),
+        "nlp_detected_mood": detect_emotion(message)
+    }
