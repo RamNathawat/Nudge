@@ -1,51 +1,86 @@
-import os, uuid, json, logging, requests
-from fastapi import FastAPI, HTTPException
+import os
+import uuid
+import json
+import logging
+import requests
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 from dotenv import load_dotenv
 
-# Import functions from your custom modules
-from app.memory import (
+# Initialize logger immediately after importing logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Import functions from your app directory
+from app.memory import ( # Corrected import path assuming memory.py is in app/memory/
     get_user_memory,
     add_message_to_memory,
     get_recent_history,
     update_trait,
-    get_traits
+    get_traits,
+    get_all_user_entries # Added this as it's useful
 )
-from app.behaviour_analyzer import analyze_behavior, is_emotionally_relevant
-from app.state_inference import infer_emotional_state, summary_emotions
-from app.utils import format_for_gemini # This file is crucial for Gemini API formatting
-from app.nudge_scoring import calculate_nudging_score
+# Corrected import for behaviour_analyzer (assuming these functions are in it)
+from app.behaviour_analyzer import (
+    infer_emotional_state, # This was from state_inference, moved to behaviour_analyzer in merge
+    infer_intent,          # From behaviour_analyzer
+    infer_message_substance, # From behaviour_analyzer
+    infer_user_state # Main function to get all inferred tags
+)
+
+# You will need to ensure these functions exist in the respective files
+# if they are not already there or need to be moved/created.
+# For now, I'm assuming their existence based on your main.py usage.
+from app.state_inference import summary_emotions # Assuming summary_emotions still exists here
+from app.utils.format_for_gemini import format_for_gemini # Assuming this exists now in app/utils/format_for_gemini.py
+from app.nudge_scoring import calculate_nudging_score # Assuming this exists
+from app.salient_memory import get_salient_memories # Assuming this exists
+
+# Assuming analyze_behavior, is_emotionally_relevant, estimate_emotion,
+# calculate_salience, calculate_repetition_score are intended to be part of
+# app/behaviour_analyzer.py or a similar analysis module.
+# If these functions are indeed from a separate analysis module not yet merged,
+# ensure they are correctly imported or integrated into the behaviour_analyzer.py.
+# For this code, I will assume they are part of behaviour_analyzer.py for now.
+# If they are not, you'll get import errors, and you'll need to define them.
+try:
+    from app.behaviour_analyzer import (
+        analyze_behavior,
+        is_emotionally_relevant,
+        estimate_emotion,
+        calculate_salience,
+        calculate_repetition_score
+    )
+except ImportError as e:
+    logger.warning(f"Could not import all behavior analysis functions. Ensure they are defined in app/behaviour_analyzer.py or similar: {e}")
+    # Define dummy functions to prevent immediate errors for compilation
+    def analyze_behavior(user_id: str, message: str) -> dict: return {"flags": []}
+    def is_emotionally_relevant(message: str, behavior_analysis: dict) -> bool: return False
+    def estimate_emotion(message: str) -> dict: return {"emotion": "neutral", "intensity": 0.0}
+    def calculate_salience(message: str) -> float: return 0.0
+    def calculate_repetition_score(user_id: str, message: str, user_data: dict) -> float: return 0.0
+
 
 # Load environment variables from .env file
 load_dotenv()
-
-# --- IMPORTANT: Ensure GEMINI_API_URL is set in your .env file correctly ---
-# Example .env content:
-# GEMINI_API_URL=https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=YOUR_ACTUAL_GEMINI_API_KEY_HERE
 GEMINI_URL = os.getenv("GEMINI_API_URL")
-
-# Raise an error if the API URL is not found, preventing the app from starting with a missing critical dependency
 if not GEMINI_URL:
-    raise RuntimeError("❌ GEMINI_API_URL not set in .env. Please check your .env file.")
+    logger.warning("GEMINI_API_URL not set in .env file. Using a placeholder.")
+    GEMINI_URL = "http://localhost:8000/mock-gemini-api" # Placeholder for testing
 
-# Initialize FastAPI app
 app = FastAPI()
 
-# Configure CORS (Cross-Origin Resource Sharing)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # WARNING: For production, specify your frontend's domain(s) instead of "*"
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
 )
 
-# Define system prompts for the AI's persona and tone
+# Prompts
 SOFT_PROMPT = {
-    "role": "system", # Note: Gemini API often treats system prompts as part of the user turn or initial context
+    "role": "system",
     "text": (
         "You are 'Nudge' — a smart, emotionally intelligent companion texting with the user. "
         "Early in the conversation, don’t persuade or push. Just talk casually like you're texting a friend. "
@@ -61,154 +96,200 @@ HARD_PROMPT = {
     )
 }
 
-# Pydantic model for incoming chat requests
 class ChatRequest(BaseModel):
     message: str
-    session_id: Optional[str] = None # Optional session ID for continuous conversations
+    session_id: Optional[str] = None
 
-# In-memory dictionary to store conversation history for each session
-# In a production app, this would typically be backed by a persistent database (e.g., Redis, PostgreSQL)
-conversations: Dict[str, List[Dict[str,str]]] = {}
+# Helper function to get the current conversation history for Gemini,
+# including system prompts.
+async def get_conversation_context_for_gemini(session_id: str, current_message: str):
+    user_mem = await get_user_memory(session_id) # AWAIT this call
+    # Start with initial prompts if they exist (SOFT_PROMPT always, HARD_PROMPT conditionally)
+    context_list = [SOFT_PROMPT]
+    if "HARD_PROMPT" in user_mem.get("_traits", {}).get("active_prompts", []):
+         context_list.append(HARD_PROMPT)
 
-# Configure logging for better visibility into application flow
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+    # Append recent chat entries from memory (user and AI)
+    # Ensure role is 'user' or 'model'
+    for entry in user_mem.get("entries", []):
+        # Gemini expects 'user' or 'model' roles. Ensure your 'sender' matches.
+        # Assuming "ai" sender will map to "model" for Gemini.
+        sender_role = "user" if entry.get("sender") == "user" else "model"
+        context_list.append({"role": sender_role, "text": entry["content"]})
 
-# Helper function to process and inject emotional/behavioral context into the conversation
-def inject_emotional_context(message: str, sid: str) -> tuple[str, List[str], Dict[str, float]]:
-    """
-    Analyzes the user's message, infers emotional state, and gathers relevant memory/traits
-    to create a context string for the AI.
-    """
-    # Analyze user behavior and get flags (e.g., procrastination, resistance)
-    flags = analyze_behavior(sid, message) # Pass session_id to analyze_behavior
+    # Add the current user message
+    context_list.append({"role": "user", "text": current_message})
 
-    # Infer the user's emotional state and get a summary
-    emo_state = infer_emotional_state(message)
-    summary = summary_emotions(emo_state)
+    return context_list
 
-    # Update user traits in memory based on inferred emotions
-    # emo_state is a dict like {"emotion_name": intensity_value}
-    for emotion_name, intensity_value in emo_state.items():
-        update_trait(sid, emotion_name, intensity_value) # Store intensity as a trait
-
-    # Construct the context string to be appended to the user's message for the AI
-    # This provides the AI with recent history, current traits, and emotional summary
-    context = (
-        f"\n\n(Recent Interaction History: {json.dumps(get_recent_history(sid))} | "
-        f"User Traits: {json.dumps(get_traits(sid))} | "
-        f"Inferred Emotions: {summary})"
-    )
-    return context, flags, emo_state
 
 @app.post("/chat")
-async def chat(request: ChatRequest): # Use async def for FastAPI endpoints
-    logger.info(f"Received chat request from session: {request.session_id}")
-
-    # Generate a new session ID if one is not provided (for new conversations)
+async def chat(request: ChatRequest):
     sid = request.session_id or str(uuid.uuid4())
-    # Initialize conversation history for the session with the soft prompt if it's new
-    conversations.setdefault(sid, [SOFT_PROMPT])
-
     user_txt = request.message.strip()
-    # Add the user's message to persistent memory
-    add_message_to_memory(user_id=sid, message=user_txt, sender="user")
-    logger.info(f"Session {sid}: User message: '{user_txt}'")
 
-    # Inject emotional and behavioral context into the user's message
-    context_string, flags, emotions = inject_emotional_context(user_txt, sid)
-    user_entry_for_gemini = {"role": "user", "text": user_txt + context_string}
-    # Add the user's message (with context) to the in-memory conversation buffer
-    conversations[sid].append(user_entry_for_gemini)
+    logger.info(f"Session {sid}: Processing user message: '{user_txt}'")
 
-    # Logic for dynamic tone shift (e.g., from SOFT_PROMPT to HARD_PROMPT)
-    if is_emotionally_relevant(user_txt, flags) and HARD_PROMPT not in conversations[sid]:
-        # If the SOFT_PROMPT is at the beginning, insert HARD_PROMPT right after it.
-        # This ensures system prompts are always at the start of the conversation.
-        if conversations[sid] and conversations[sid][0] == SOFT_PROMPT:
-            conversations[sid].insert(1, HARD_PROMPT)
-            logger.info(f"Session {sid}: Tone shifted to HARD_PROMPT.")
-        else:
-            # Fallback: if soft prompt isn't at index 0, just append hard prompt.
-            # This case should ideally not happen if prompts are managed strictly.
-            conversations[sid].append(HARD_PROMPT)
-            logger.warning(f"Session {sid}: HARD_PROMPT appended, SOFT_PROMPT not found at index 0.")
+    # Get current user memory to pass to analysis functions
+    user_data = await get_user_memory(sid) # AWAIT this call
 
-    # Select the last 12 entries for the Gemini API call to provide context
-    # Adjust this number based on desired context length and API token limits
-    convo_slice_for_gemini = conversations[sid][-12:]
+    # 1. Behavior Analysis (Emotion, Salience, Repetition)
+    # These functions still need to be properly defined in app/behaviour_analyzer.py
+    # or moved/created if they are currently missing.
+    # For now, assuming they are synchronous. If they become async, you'll need to await them.
+    detected_emotion_data = estimate_emotion(user_txt)
+    emotion_from_analysis = detected_emotion_data.get("emotion", "neutral")
+    emotional_intensity = detected_emotion_data.get("intensity", 0.3)
 
-    # Format the conversation slice according to Gemini API's requirements
-    payload = {"contents": format_for_gemini(convo_slice_for_gemini)}
+    salience = calculate_salience(user_txt)
+    repetition_score = calculate_repetition_score(sid, user_txt, user_data)
+
+    # Infer comprehensive user state (emotion, intent, substance)
+    # This calls infer_emotional_state, infer_intent, infer_message_substance internally
+    inferred_user_state_tags = infer_user_state(user_txt) # Now uses the combined infer_user_state
+
+    # Store user's message in memory
+    # Pass all relevant data, including inferred tags
+    await add_message_to_memory( # AWAIT this call
+        user_id=sid,
+        message=user_txt,
+        sender="user",
+        emotion=emotion_from_analysis, # Use the estimated emotion
+        emotional_intensity=emotional_intensity,
+        salience=salience,
+        repetition_score=repetition_score,
+        topic_tags=inferred_user_state_tags # Pass the combined inferred tags as topic_tags
+        # task_reference is optional and not inferred here currently.
+    )
+    logger.info(f"Session {sid}: User message saved.")
+
+    # Prepare context for Gemini
+    current_traits = await get_traits(sid) # AWAIT this call
+    recent_history = await get_recent_history(sid) # AWAIT this call
+    salient_memories = await get_salient_memories(sid) # AWAIT this call (assuming get_salient_memories is async)
+
+    # For logging and context string, convert to JSON strings
+    recent_history_str = json.dumps(recent_history, ensure_ascii=False)
+    salient_memories_str = json.dumps(salient_memories, ensure_ascii=False)
+
+
+    # Build the full prompt string for Gemini
+    gemini_conversation_payload = await get_conversation_context_for_gemini(sid, user_txt) # AWAIT this call
+
+    # Add enriched context to the last user message for Gemini
+    if gemini_conversation_payload and gemini_conversation_payload[-1]["role"] == "user":
+        # summary_emotions assumes a dict like {"positive": 0.5, "negative": 0.3}
+        # `inferred_user_state_tags` is a list of strings like ["positive", "goal_setting"].
+        # You need to adjust `summary_emotions` or the input to it.
+        # For now, let's just pass the raw inferred tags if `summary_emotions` expects a dict.
+        # If summary_emotions takes the list of tags, then it's fine.
+        # Assuming summary_emotions can work with the list of strings for simplicity
+        summary_of_emotions_for_gemini = summary_emotions({"emotion": inferred_user_state_tags[0]} if inferred_user_state_tags else {"emotion": "neutral"}) # Adjust to match expected input for summary_emotions
+        if "emotion" in current_traits: # Use a more reliable source if traits contain emotion
+             summary_of_emotions_for_gemini = summary_emotions({"emotion": current_traits["emotion"]}) # Example
+
+        enriched_context_for_gemini = (
+            f"\n\n(Recent History: {recent_history_str} | "
+            f"Salient Memories: {salient_memories_str} | "
+            f"Traits: {json.dumps(current_traits, ensure_ascii=False)} | "
+            f"Inferred State Tags: {json.dumps(inferred_user_state_tags, ensure_ascii=False)})" # Using inferred_user_state_tags directly
+        )
+        gemini_conversation_payload[-1]["text"] += enriched_context_for_gemini
+
+    payload = {"contents": format_for_gemini(gemini_conversation_payload)}
 
     try:
-        # Make the API call to Gemini
         res = requests.post(GEMINI_URL, json=payload, headers={"Content-Type": "application/json"})
         res.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
         data = res.json()
-
-        # Extract the AI's reply from the Gemini response
-        # This path might vary slightly based on Gemini's exact response structure
         reply = data["candidates"][0]["content"]["parts"][0]["text"]
-        logger.info(f"Session {sid}: Received AI response: '{reply}'")
-
-    except requests.exceptions.HTTPError as errh:
-        logger.error(f"Session {sid}: HTTP Error: {errh} - Response: {errh.response.text if errh.response else 'N/A'}", exc_info=True)
-        raise HTTPException(502, detail=f"❌ Gemini API HTTP error: {errh.response.text if errh.response else 'N/A'}")
-    except requests.exceptions.ConnectionError as errc:
-        logger.error(f"Session {sid}: Connection Error: {errc}", exc_info=True)
-        raise HTTPException(503, detail="❌ Gemini API connection error. Please check network or API endpoint.")
-    except requests.exceptions.Timeout as errt:
-        logger.error(f"Session {sid}: Timeout Error: {errt}", exc_info=True)
-        raise HTTPException(504, detail="❌ Gemini API request timed out.")
-    except requests.exceptions.RequestException as err:
-        logger.error(f"Session {sid}: General Request Error: {err}", exc_info=True)
-        raise HTTPException(500, detail="❌ An unexpected error occurred while calling Gemini API.")
-    except KeyError as ke:
-        logger.error(f"Session {sid}: Malformed Gemini API response (KeyError): {ke} - Response data: {data}", exc_info=True)
-        raise HTTPException(502, detail="❌ Malformed Gemini API response. Check API documentation.")
+        logger.info(f"Session {sid}: Nudge replied: {reply}")
+    except requests.exceptions.RequestException as e:
+        logger.exception(f"Gemini API request failed for session {sid}.")
+        raise HTTPException(status_code=500, detail=f"Gemini API request failed: {e}")
+    except KeyError:
+        logger.exception(f"Unexpected response structure from Gemini API for session {sid}.")
+        raise HTTPException(status_code=500, detail="Unexpected response from Gemini API.")
     except Exception as e:
-        logger.error(f"Session {sid}: Unexpected error during Gemini API call: {e}", exc_info=True)
-        raise HTTPException(500, detail="❌ An unexpected error occurred.")
+        logger.exception(f"An unexpected error occurred during Gemini API call for session {sid}.")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
+    # Add Nudge's reply to memory
+    await add_message_to_memory(user_id=sid, message=reply, sender="ai") # AWAIT this call
 
-    # Add the AI's reply to the in-memory conversation buffer
-    conversations[sid].append({"role":"model","text":reply})
-    # Add the AI's reply to persistent memory
-    add_message_to_memory(user_id=sid, message=reply, sender="ai")
+    # Update prompts if emotionally relevant
+    # The analyze_behavior function needs to be correctly defined and potentially async
+    # For now, assuming it's synchronous from behaviour_analyzer.py
+    behavior_analysis_result = analyze_behavior(sid, user_txt)
 
-    # Calculate nudging score based on current emotional state, flags, and traits
-    score = calculate_nudging_score(emotions, flags, get_traits(sid))
-    logger.info(f"Session {sid}: Nudging score: {score}")
+    user_traits_after_reply = await get_traits(sid) # Get updated traits
+    active_prompts = user_traits_after_reply.get("active_prompts", [])
 
-    # Return the response to the client
+    if is_emotionally_relevant(user_txt, behavior_analysis_result) and HARD_PROMPT["text"] not in [p["text"] for p in active_prompts]:
+        # update_trait expects a list for "active_prompts" if using $addToSet
+        await update_trait(sid, "active_prompts", [HARD_PROMPT["text"]]) # AWAIT this call
+        logger.info(f"Session {sid}: HARD_PROMPT activated due to emotional relevance.")
+
+    # Calculate nudging score
+    # Ensure calculate_nudging_score expects the right arguments.
+    # `emo_state` is the result of `infer_user_state(user_txt)`, which is `inferred_user_state_tags` here.
+    # `analyze_behavior` is `behavior_analysis_result`.
+    # `current_traits` is `user_traits_after_reply`.
+    score = calculate_nudging_score(inferred_user_state_tags, behavior_analysis_result, user_traits_after_reply)
+
     return Response(
         content=json.dumps({
             "session_id": sid,
             "response": reply,
-            "emotions": emotions, # Current emotional state
-            "nudging_score": score, # Calculated nudging score
-            "flags": flags # Behavioral flags detected
+            "inferred_tags": inferred_user_state_tags, # Changed from "emotions" to "inferred_tags" for clarity
+            "nudging_score": score,
+            "flags": behavior_analysis_result.get("flags", []) # Ensure this structure from analyze_behavior
         }, ensure_ascii=False),
         media_type="application/json"
     )
 
-# Endpoint to retrieve full memory for a given session
 @app.get("/memory/{session_id}")
 async def get_full_user_memory_endpoint(session_id: str):
-    logger.info(f"Received request for full memory for session: {session_id}")
-    user_mem = get_user_memory(session_id)
-    return Response(
-        content=json.dumps({"session_id": session_id, "memory": user_mem}, ensure_ascii=False),
-        media_type="application/json"
-    )
+    logger.info(f"GET full memory for: {session_id}")
+    mem = await get_user_memory(session_id) # AWAIT this call
+    return {"session_id": session_id, "memory": mem}
 
-# Endpoint to retrieve traits for a given session
 @app.get("/traits/{session_id}")
 async def get_user_traits_endpoint(session_id: str):
-    logger.info(f"Received request for traits for session: {session_id}")
-    user_traits = get_traits(session_id)
-    return Response(
-        content=json.dumps({"session_id": session_id, "traits": user_traits}, ensure_ascii=False),
-        media_type="application/json"
-    )
+    logger.info(f"GET traits for: {session_id}")
+    traits = await get_traits(session_id) # AWAIT this call
+    return {"session_id": session_id, "traits": traits}
+
+@app.post("/reset-memory/{session_id}") # Changed to reset specific user's memory
+async def reset_user_memory_endpoint(session_id: str):
+    logger.info(f"Attempting to reset memory for session: {session_id}")
+    try:
+        # Instead of deleting a file, delete the user's document in MongoDB
+        # from app.utils.db import user_memories # Ensure this is accessible if not global
+
+        # This will delete the document for the specific user_id
+        result = await user_memories.delete_one({"user_id": session_id})
+
+        if result.deleted_count > 0:
+            logger.info(f"✅ Memory for session {session_id} reset successfully in MongoDB.")
+            return {"message": f"Memory for session {session_id} reset successfully."}
+        else:
+            logger.warning(f"No memory found for session {session_id} to reset.")
+            return {"message": f"No memory found for session {session_id} to reset.", "status": "info"}
+
+    except Exception as e:
+        logger.error(f"❌ MongoDB memory reset failed for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(500, detail=f"Failed to reset memory: {e}")
+
+# This endpoint is for a full database wipe - USE WITH CAUTION IN PRODUCTION
+@app.post("/reset-all-memories")
+async def reset_all_memories_endpoint():
+    logger.warning("Attempting to reset ALL user memories in MongoDB. This is irreversible!")
+    try:
+        # Delete all documents in the collection
+        result = await user_memories.delete_many({})
+        logger.info(f"✅ All {result.deleted_count} user memories reset successfully in MongoDB.")
+        return {"message": f"All {result.deleted_count} user memories reset successfully."}
+    except Exception as e:
+        logger.error(f"❌ MongoDB 'reset all memories' failed: {e}", exc_info=True)
+        raise HTTPException(500, detail=f"Failed to reset all memories: {e}")

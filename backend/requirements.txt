@@ -24,3 +24,5 @@ python-dotenv==1.0.1         # To load .env config
 scikit-learn==1.4.2
 nltk==3.8.1
 spacy==3.7.4
+motor==X.Y.Z # Use a specific version, e.g., motor==4.0.0
+pymongo==A.B.C # Use a specific version, e.g., pymongo==4.7.0

@@ -1,58 +1,34 @@
-# app/task_topic_inference.py
+from typing import Optional, List, Dict
 
-import re
-
-def infer_task_topic(text: str) -> str:
+def infer_task_topic(message: str) -> Optional[str]:
     """
-    Infer the task topic from message text.
+    Infers a task or topic from the user's message.
+    This is a placeholder and would require more sophisticated NLP.
     """
-    lower = text.lower()
+    message_lower = message.lower()
+    if "work" in message_lower or "project" in message_lower:
+        return "work_related"
+    if "study" in message_lower or "learn" in message_lower:
+        return "learning"
+    if "health" in message_lower or "exercise" in message_lower:
+        return "health_fitness"
+    if "goal" in message_lower or "achieve" in message_lower:
+        return "personal_goals"
+    return None
 
-    # Task Topic Detection
-    if any(kw in lower for kw in ["gym", "workout", "diet", "fit", "exercise", "body"]):
-        topic = "health"
-    elif any(kw in lower for kw in ["money", "spend", "save", "income", "salary", "debt", "budget"]):
-        topic = "finance"
-    elif any(kw in lower for kw in ["project", "code", "app", "build", "website", "startup", "feature"]):
-        topic = "career"
-    elif any(kw in lower for kw in ["relationship", "talk", "crush", "heart", "feelings"]):
-        topic = "relationship"
-    elif any(kw in lower for kw in ["study", "exam", "college", "test", "assignment", "homework"]):
-        topic = "education"
-    else:
-        topic = "unknown"
-    return topic
-
-def infer_user_state(text: str) -> dict:
+def infer_ongoing_tasks(user_id: str) -> List[Dict]:
     """
-    Infer user intent, substance use, and task topic from message text.
-    Returns: dict with intent, substance, and task_topic.
-    (This function was previously provided by you, kept for completeness)
+    Placeholder function to infer ongoing tasks for a user.
+    In a real system, this would likely involve checking memory for task-related entries,
+    or a dedicated task tracking system.
     """
-    lower = text.lower()
+    # For demonstration, returning a dummy task.
+    return [{"id": "task_123", "description": "Finish the report", "status": "pending"}]
 
-    # Substance Detection
-    if any(kw in lower for kw in ["weed", "joint", "high", "stoned"]):
-        substance = "weed"
-    elif any(kw in lower for kw in ["alcohol", "drunk", "booze", "beer", "vodka"]):
-        substance = "alcohol"
-    elif any(kw in lower for kw in ["cigarette", "nicotine", "smoke", "vape"]):
-        substance = "nicotine"
-    else:
-        substance = "none"
-
-    # Intent Detection
-    if any(kw in lower for kw in ["procrastinate", "delay", "skip", "avoid"]):
-        intent = "avoidant"
-    elif any(kw in lower for kw in ["finish", "complete", "do this", "get done", "start working"]):
-        intent = "productive"
-    elif any(kw in lower for kw in ["chill", "relax", "watch", "game", "movie", "binge"]):
-        intent = "recreational"
-    else:
-        intent = "unknown"
-
-    return {
-        "intent": intent,
-        "substance": substance,
-        "task_topic": infer_task_topic(text) # Use the specific infer_task_topic
-    }
+def generate_task_nudge(task: Dict) -> str:
+    """
+    Generates a specific nudge for a given task.
+    """
+    if task["status"] == "pending":
+        return f"How's progress on '{task['description']}'? Just checking in."
+    return ""
