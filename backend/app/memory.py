@@ -1,36 +1,26 @@
-import json
 from datetime import datetime, timedelta
-# Assuming models.py and nlp_analysis.py are correctly defined elsewhere
+from pymongo import MongoClient
+from bson import ObjectId
 from .models import MemoryEntry
 from .nlp_analysis import extract_topic_tags, estimate_emotion
+import os
+from dotenv import load_dotenv
 
-MEMORY_FILE = "user_memory.json"
-MEMORY_DECAY_DAYS = 15  # How long before memory starts fading
+load_dotenv()
 
-def load_memory():
-    try:
-        with open(MEMORY_FILE, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+MONGO_URI = os.getenv("MONGO_URI")
+client = MongoClient(MONGO_URI)
+db = client["nudge_db"]
+entries_collection = db["entries"]
+traits_collection = db["traits"]
 
-def save_memory(memory):
-    # Ensure datetime objects are serialized correctly
-    def serialize_datetime(obj):
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        raise TypeError("Type %s not serializable" % type(obj))
-
-    with open(MEMORY_FILE, "w") as f:
-        json.dump(memory, f, indent=2, default=serialize_datetime)
+MEMORY_DECAY_DAYS = 15
 
 def add_message_to_memory(user_id, message, sender="user", task_reference=None):
-    memory = load_memory()
-
     emotion, intensity = estimate_emotion(message)
     topic_tags = extract_topic_tags(message)
 
-    timestamp = datetime.now()
+    timestamp = datetime.utcnow()
     salience = compute_salience(emotion, intensity, message, topic_tags)
     repetition_score = compute_repetition_score(user_id, message)
 
@@ -44,37 +34,29 @@ def add_message_to_memory(user_id, message, sender="user", task_reference=None):
         repetition_score=repetition_score,
         topic_tags=topic_tags,
         task_reference=task_reference,
-        sender=sender # Store sender as well
+        sender=sender
     ).dict()
 
-    # Ensure user_id has a structure for entries and _traits
-    if user_id not in memory:
-        memory[user_id] = {"entries": [], "_traits": {}}
-
-    memory[user_id]["entries"].append(new_entry)
-    save_memory(memory)
+    entries_collection.insert_one(new_entry)
 
 def compute_salience(emotion, intensity, message, tags):
-    base = len(message) / 50  # longer = more salient
+    base = len(message) / 50
     emotional_bonus = intensity * 2
     topic_bonus = 0.2 * len(tags)
     return round(base + emotional_bonus + topic_bonus, 2)
 
 def compute_repetition_score(user_id, new_message):
-    memory = load_memory().get(user_id, {})
-    user_entries = memory.get("entries", []) # Access entries for the specific user
+    user_entries = list(entries_collection.find({"user_id": user_id}))
     count = sum(1 for m in user_entries if new_message.strip().lower() in m['content'].strip().lower())
     return round(min(count / 5, 1.0), 2)
 
 def get_relevant_memory(user_id):
-    memory = load_memory().get(user_id, {})
-    user_entries = memory.get("entries", [])
+    user_entries = list(entries_collection.find({"user_id": user_id}))
     relevant = []
-    now = datetime.now()
+    now = datetime.utcnow()
 
     for entry in user_entries:
-        # Convert timestamp string back to datetime object for calculations
-        entry_time = datetime.fromisoformat(entry["timestamp"])
+        entry_time = entry["timestamp"]
         days_old = (now - entry_time).days
         decay = max(0.0, 1.0 - days_old / MEMORY_DECAY_DAYS)
 
@@ -91,29 +73,23 @@ def get_relevant_memory(user_id):
     return [e for _, e in relevant]
 
 def get_user_memory(user_id):
-    """Returns all raw memory entries for a given user."""
-    memory = load_memory().get(user_id, {})
-    return memory.get("entries", [])
+    return list(entries_collection.find({"user_id": user_id}))
 
 def get_recent_history(user_id):
-    """Returns the content of the most recent 5 relevant memory entries for a user."""
     relevant_memories = get_relevant_memory(user_id)
-    # Return content of the last 5 relevant memories
     return [entry['content'] for entry in relevant_memories[:5]]
 
 def update_trait(user_id, trait_name, value):
-    """Updates a specific trait for a user. Traits are stored in a special '_traits' key."""
-    memory = load_memory()
-    if user_id not in memory:
-        memory[user_id] = {"entries": [], "_traits": {}} # Ensure structure exists
-
-    if "_traits" not in memory[user_id]: # Defensive check
-        memory[user_id]["_traits"] = {}
-
-    memory[user_id]["_traits"][trait_name] = value
-    save_memory(memory)
+    traits_doc = traits_collection.find_one({"user_id": user_id})
+    if traits_doc:
+        traits_doc["traits"][trait_name] = value
+        traits_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"traits": traits_doc["traits"]}}
+        )
+    else:
+        traits_collection.insert_one({"user_id": user_id, "traits": {trait_name: value}})
 
 def get_traits(user_id):
-    """Returns all traits for a user."""
-    memory = load_memory().get(user_id, {})
-    return memory.get("_traits", {}) # Return the traits dictionary
+    traits_doc = traits_collection.find_one({"user_id": user_id})
+    return traits_doc.get("traits", {}) if traits_doc else {}
