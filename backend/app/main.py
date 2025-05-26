@@ -100,7 +100,13 @@ def inject_emotional_context(message: str, sid: str) -> tuple[str, List[str], Di
         f"Inferred Emotions: {summary})"
     )
     return context, flags, emo_state
-
+@app.get('/health')
+def health_check():
+    """
+    Simple health check endpoint to verify if the service is running.
+    Returns a 200 OK response with a message.
+    """
+    return {"status": "ok", "message": "Nudge AI service is running."}
 @app.post("/chat")
 async def chat(request: ChatRequest): # Use async def for FastAPI endpoints
     logger.info(f"Received chat request from session: {request.session_id}")
