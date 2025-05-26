@@ -1,30 +1,27 @@
 # Core App Requirements
-fastapi==0.115.2
-uvicorn==0.34.2
-pydantic==2.4.2
-pydantic_core==2.10.1
-starlette==0.32.0.post1
+fastapi==0.110.2
+uvicorn==0.29.0
+pydantic==2.6.4
+starlette==0.36.3
 anyio==4.2.0
-click==8.1.7
-h11==0.14.0
-idna==3.4
-sniffio==1.3.1
-typing-inspection==0.4.0
-typing_extensions==4.11.0
-
-# NLP & Transformers
-transformers==4.41.1
-torch==2.3.0
-sentence-transformers==2.7.0
-
-# Utility
-requests==2.31.0
-httpx==0.27.0
 python-dotenv==1.0.1
+
+# Async + HTTP clients
+httpx==0.27.0
+requests==2.31.0
+click==8.1.7
+
+# NLP & ML
+transformers==4.39.3
+torch==2.2.2
+sentence-transformers==2.6.1
 scikit-learn==1.4.2
 nltk==3.8.1
 spacy==3.7.4
 
-# MongoDB
+# MongoDB Client
 pymongo==4.7.2
-dnspython==2.6.1
+
+# Utility
+typing-inspection==0.9.0
+typing_extensions==4.10.0
