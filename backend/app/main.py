@@ -38,11 +38,12 @@ app = FastAPI()
 # Configure CORS (Cross-Origin Resource Sharing)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # WARNING: For production, specify your frontend's domain(s) instead of "*"
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_origins=["*"],  # ✅ Allow all domains
+    allow_credentials=False,  # ❗ Must be False to use "*"
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
 
 # Define system prompts for the AI's persona and tone
 SOFT_PROMPT = {
