@@ -12,7 +12,8 @@ from app.memory import (
     add_message_to_memory,
     get_recent_history,
     update_trait,
-    get_traits
+    get_traits,
+    get_relevant_memory 
 )
 from app.behaviour_analyzer import analyze_behavior, is_emotionally_relevant
 from app.state_inference import infer_emotional_state, summary_emotions
@@ -108,7 +109,77 @@ def health_check():
     """
     return {"status": "ok", "message": "Nudge AI service is running."}
 @app.post("/chat")
-async def chat(request: ChatRequest): # Use async def for FastAPI endpoints
+async def chat(request: ChatRequest):
+    logger.info(f"Received chat request from session: {request.session_id}")
+
+    # Generate a new session ID if one is not provided
+    sid = request.session_id or str(uuid.uuid4())
+    conversations.setdefault(sid, [SOFT_PROMPT])
+
+    user_txt = request.message.strip()
+
+    # Save the user message in MongoDB memory
+    add_message_to_memory(user_id=sid, message=user_txt, sender="user")
+    logger.info(f"Session {sid}: User message: '{user_txt}'")
+
+    # Get emotional context and traits
+    context_string, flags, emotions = inject_emotional_context(user_txt, sid)
+
+    # Rebuild the conversation history for Gemini
+    memory_entries = get_relevant_memory(sid)
+    for entry in memory_entries[:5]:
+        conversations[sid].append({
+            "role": "user" if entry.get("sender", "user") == "user" else "model",
+            "text": entry["content"]
+        })
+
+    # Add current user message with emotional info
+    conversations[sid].append({
+        "role": "user",
+        "text": f"{user_txt}\n\n(Emotions: {summary_emotions(emotions)} | Traits: {json.dumps(get_traits(sid))})"
+    })
+
+    # Handle tone shift
+    if is_emotionally_relevant(user_txt, flags) and HARD_PROMPT not in conversations[sid]:
+        if conversations[sid] and conversations[sid][0] == SOFT_PROMPT:
+            conversations[sid].insert(1, HARD_PROMPT)
+            logger.info(f"Session {sid}: Tone shifted to HARD_PROMPT.")
+        else:
+            conversations[sid].append(HARD_PROMPT)
+            logger.warning(f"Session {sid}: HARD_PROMPT appended unexpectedly.")
+
+    # Slice to last 12 messages for Gemini
+    convo_slice_for_gemini = conversations[sid][-12:]
+    payload = {"contents": format_for_gemini(convo_slice_for_gemini)}
+
+    try:
+        res = requests.post(GEMINI_URL, json=payload, headers={"Content-Type": "application/json"})
+        res.raise_for_status()
+        data = res.json()
+        reply = data["candidates"][0]["content"]["parts"][0]["text"]
+        logger.info(f"Session {sid}: Received AI response: '{reply}'")
+
+    except requests.exceptions.RequestException as err:
+        logger.error(f"Session {sid}: Gemini API error: {err}", exc_info=True)
+        raise HTTPException(500, detail="Gemini API call failed.")
+
+    # Save bot reply in memory
+    conversations[sid].append({"role": "model", "text": reply})
+    add_message_to_memory(user_id=sid, message=reply, sender="ai")
+
+    # Calculate nudging score
+    score = calculate_nudging_score(emotions, flags, get_traits(sid))
+
+    return Response(
+        content=json.dumps({
+            "session_id": sid,
+            "response": reply,
+            "emotions": emotions,
+            "nudging_score": score,
+            "flags": flags
+        }, ensure_ascii=False),
+        media_type="application/json"
+    )
     logger.info(f"Received chat request from session: {request.session_id}")
 
     # Generate a new session ID if one is not provided (for new conversations)
