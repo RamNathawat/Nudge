@@ -38,11 +38,12 @@ app = FastAPI()
 # Configure CORS (Cross-Origin Resource Sharing)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ✅ Allow all domains
-    allow_credentials=False,  # ❗ Must be False to use "*"
+    allow_origins=["https://leafy-tiramisu-ed9886.netlify.app"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 # Define system prompts for the AI's persona and tone
