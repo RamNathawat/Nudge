@@ -24,3 +24,8 @@ pymongo
 # Utility
 typing_extensions
 typing-inspection
+jose
+jwt
+bson
+pydantic
+bcrypt
