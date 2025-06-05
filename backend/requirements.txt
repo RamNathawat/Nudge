@@ -26,6 +26,5 @@ typing_extensions
 typing-inspection
 python-jose
 jwt
-bson
 pydantic
 bcrypt
