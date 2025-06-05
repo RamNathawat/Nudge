@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from pymongo import MongoClient
 from bson import ObjectId
 from .models import MemoryEntry
@@ -40,10 +40,7 @@ def add_message_to_memory(user_id, message, sender="user", task_reference=None):
     entries_collection.insert_one(new_entry)
 
 def compute_salience(emotion, intensity, message, tags):
-    base = len(message) / 50
-    emotional_bonus = intensity * 2
-    topic_bonus = 0.2 * len(tags)
-    return round(base + emotional_bonus + topic_bonus, 2)
+    return round(len(message) / 50 + intensity * 2 + 0.2 * len(tags), 2)
 
 def compute_repetition_score(user_id, new_message):
     user_entries = list(entries_collection.find({"user_id": user_id}))
@@ -51,21 +48,19 @@ def compute_repetition_score(user_id, new_message):
     return round(min(count / 5, 1.0), 2)
 
 def get_relevant_memory(user_id):
+    from datetime import datetime
     user_entries = list(entries_collection.find({"user_id": user_id}))
     relevant = []
     now = datetime.utcnow()
 
     for entry in user_entries:
-        entry_time = entry["timestamp"]
-        days_old = (now - entry_time).days
+        days_old = (now - entry["timestamp"]).days
         decay = max(0.0, 1.0 - days_old / MEMORY_DECAY_DAYS)
-
         weight = (
             entry["salience"] * 0.4 +
             entry["emotional_intensity"] * 0.4 +
             entry["repetition_score"] * 0.2
         ) * decay
-
         if weight > 0.25:
             relevant.append((weight, entry))
 
@@ -76,8 +71,7 @@ def get_user_memory(user_id):
     return list(entries_collection.find({"user_id": user_id}))
 
 def get_recent_history(user_id):
-    relevant_memories = get_relevant_memory(user_id)
-    return [entry['content'] for entry in relevant_memories[:5]]
+    return [e["content"] for e in get_relevant_memory(user_id)[:5]]
 
 def update_trait(user_id, trait_name, value):
     traits_doc = traits_collection.find_one({"user_id": user_id})
@@ -91,5 +85,5 @@ def update_trait(user_id, trait_name, value):
         traits_collection.insert_one({"user_id": user_id, "traits": {trait_name: value}})
 
 def get_traits(user_id):
-    traits_doc = traits_collection.find_one({"user_id": user_id})
-    return traits_doc.get("traits", {}) if traits_doc else {}
+    doc = traits_collection.find_one({"user_id": user_id})
+    return doc.get("traits", {}) if doc else {}
