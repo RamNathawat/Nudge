@@ -28,3 +28,4 @@ python-jose
 jwt
 pydantic
 bcrypt
+passlib[bcrypt]

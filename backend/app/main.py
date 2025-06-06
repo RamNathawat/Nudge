@@ -6,6 +6,47 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List
 from dotenv import load_dotenv
 
+# Load .env
+load_dotenv()
+GEMINI_URL = os.getenv("GEMINI_API_URL")
+if not GEMINI_URL:
+    raise RuntimeError("❌ GEMINI_API_URL not set in .env")
+
+# Core app
+app = FastAPI()
+
+# CORS Setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Change this in production!
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Prompts
+SOFT_PROMPT = {
+    "role": "system",
+    "text": "You are 'Nudge' — a smart companion texting with the user. Start casual, build tension, then nudge."
+}
+HARD_PROMPT = {
+    "role": "system",
+    "text": "You are 'Nudge' — sharp and persuasive. Challenge user behavior using tone-mirroring and psychology."
+}
+
+# Session store
+conversations: Dict[str, List[Dict[str, str]]] = {}
+
+# Chat input
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+# --- Import app modules ---
 from app.auth import verify_token
 from app.memory import (
     get_user_memory, add_message_to_memory, get_recent_history,
@@ -16,43 +57,12 @@ from app.state_inference import infer_emotional_state, summary_emotions
 from app.utils import format_for_gemini
 from app.nudge_scoring import calculate_nudging_score
 
-load_dotenv()
-GEMINI_URL = os.getenv("GEMINI_API_URL")
-if not GEMINI_URL:
-    raise RuntimeError("❌ GEMINI_API_URL not set in .env")
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Use full frontend origin in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-SOFT_PROMPT = {
-    "role": "system",
-    "text": "You are 'Nudge' — a smart companion texting with the user. Start casual, build tension, then nudge."
-}
-HARD_PROMPT = {
-    "role": "system",
-    "text": "You are 'Nudge' — sharp and persuasive. Challenge user behavior using tone-mirroring and psychology."
-}
-
-conversations: Dict[str, List[Dict[str, str]]] = {}
-
-class ChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-
+# --- HEALTH ---
 @app.get("/health")
 def health_check():
     return {"status": "ok", "message": "Nudge AI service is running."}
 
+# --- CHAT ---
 @app.post("/chat")
 async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
     sid = request.session_id or str(uuid.uuid4())
@@ -62,6 +72,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
     add_message_to_memory(user_id=user_id, message=user_txt, sender="user")
     context_string, flags, emotions = inject_context(user_txt, user_id)
 
+    # Pull relevant memory into convo
     for entry in get_relevant_memory(user_id)[:5]:
         conversations[sid].append({
             "role": "user" if entry.get("sender") == "user" else "model",
@@ -73,12 +84,14 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
         "text": f"{user_txt}\n\n(Emotions: {summary_emotions(emotions)} | Traits: {json.dumps(get_traits(user_id))})"
     })
 
+    # Tone shift
     if is_emotionally_relevant(user_txt, flags) and HARD_PROMPT not in conversations[sid]:
         if conversations[sid][0] == SOFT_PROMPT:
             conversations[sid].insert(1, HARD_PROMPT)
         else:
             conversations[sid].append(HARD_PROMPT)
 
+    # Gemini Request
     payload = {"contents": format_for_gemini(conversations[sid][-12:])}
 
     try:
@@ -104,6 +117,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
         media_type="application/json"
     )
 
+# --- MEMORY ROUTES ---
 @app.get("/memory")
 async def full_memory(user_id: str = Depends(verify_token)):
     return get_user_memory(user_id)
@@ -112,6 +126,7 @@ async def full_memory(user_id: str = Depends(verify_token)):
 async def full_traits(user_id: str = Depends(verify_token)):
     return get_traits(user_id)
 
+# --- CONTEXT BUILDER ---
 def inject_context(msg: str, user_id: str):
     flags = analyze_behavior(user_id, msg)
     emo_state = infer_emotional_state(msg)
@@ -123,3 +138,7 @@ def inject_context(msg: str, user_id: str):
         f"User Traits: {json.dumps(get_traits(user_id))} | Inferred Emotions: {summary})"
     )
     return context, flags, emo_state
+
+# ✅ --- Register auth routes ---
+from app.auth import router as auth_router
+app.include_router(auth_router)
