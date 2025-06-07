@@ -12,13 +12,13 @@ GEMINI_URL = os.getenv("GEMINI_API_URL")
 if not GEMINI_URL:
     raise RuntimeError("❌ GEMINI_API_URL not set in .env")
 
-# Core app
+# FastAPI app init
 app = FastAPI()
 
-# CORS Setup
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change this in production!
+    allow_origins=["*"],  # Change in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,15 +38,15 @@ HARD_PROMPT = {
     "text": "You are 'Nudge' — sharp and persuasive. Challenge user behavior using tone-mirroring and psychology."
 }
 
-# Session store
+# In-memory convo storage
 conversations: Dict[str, List[Dict[str, str]]] = {}
 
-# Chat input
+# Request schema
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
 
-# --- Import app modules ---
+# --- App imports ---
 from app.auth import verify_token
 from app.memory import (
     get_user_memory, add_message_to_memory, get_recent_history,
@@ -57,28 +57,30 @@ from app.state_inference import infer_emotional_state, summary_emotions
 from app.utils import format_for_gemini
 from app.nudge_scoring import calculate_nudging_score
 
-# --- HEALTH ---
+# --- Healthcheck ---
 @app.get("/health")
 def health_check():
     return {"status": "ok", "message": "Nudge AI service is running."}
 
-# --- CHAT ---
+# --- Chat route ---
 @app.post("/chat")
 async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
-    sid = request.session_id or str(uuid.uuid4())
+    # 🔒 Make session unique per user
+    sid = f"{user_id}-{request.session_id or str(uuid.uuid4())}"
     conversations.setdefault(sid, [SOFT_PROMPT])
 
     user_txt = request.message.strip()
     add_message_to_memory(user_id=user_id, message=user_txt, sender="user")
     context_string, flags, emotions = inject_context(user_txt, user_id)
 
-    # Pull relevant memory into convo
+    # Load past memory
     for entry in get_relevant_memory(user_id)[:5]:
         conversations[sid].append({
             "role": "user" if entry.get("sender") == "user" else "model",
             "text": entry["content"]
         })
 
+    # Add current input
     conversations[sid].append({
         "role": "user",
         "text": f"{user_txt}\n\n(Emotions: {summary_emotions(emotions)} | Traits: {json.dumps(get_traits(user_id))})"
@@ -91,9 +93,8 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
         else:
             conversations[sid].append(HARD_PROMPT)
 
-    # Gemini Request
+    # Gemini call
     payload = {"contents": format_for_gemini(conversations[sid][-12:])}
-
     try:
         res = requests.post(GEMINI_URL, json=payload, headers={"Content-Type": "application/json"})
         res.raise_for_status()
@@ -117,7 +118,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
         media_type="application/json"
     )
 
-# --- MEMORY ROUTES ---
+# --- Memory Access ---
 @app.get("/memory")
 async def full_memory(user_id: str = Depends(verify_token)):
     return get_user_memory(user_id)
@@ -126,7 +127,7 @@ async def full_memory(user_id: str = Depends(verify_token)):
 async def full_traits(user_id: str = Depends(verify_token)):
     return get_traits(user_id)
 
-# --- CONTEXT BUILDER ---
+# --- Context ---
 def inject_context(msg: str, user_id: str):
     flags = analyze_behavior(user_id, msg)
     emo_state = infer_emotional_state(msg)
@@ -139,6 +140,6 @@ def inject_context(msg: str, user_id: str):
     )
     return context, flags, emo_state
 
-# ✅ --- Register auth routes ---
+# --- Auth ---
 from app.auth import router as auth_router
 app.include_router(auth_router)

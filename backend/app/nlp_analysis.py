@@ -1,28 +1,42 @@
 from functools import lru_cache
-from transformers import pipeline
+from transformers import pipeline, Pipeline
+from transformers.pipelines.pt_utils import KeyDataset
+from keybert import KeyBERT
 
 @lru_cache(maxsize=1)
-def get_emotion_classifier():
+def get_emotion_classifier() -> Pipeline:
     return pipeline(
         "text-classification",
         model="j-hartmann/emotion-english-distilroberta-base",
-        return_all_scores=False
+        tokenizer="j-hartmann/emotion-english-distilroberta-base",
+        return_all_scores=False,
+        truncation=True,       # ✅ Ensures long inputs are safely truncated
+        max_length=512         # ✅ Limit to model max token limit
     )
 
 def detect_emotion(text: str) -> str:
+    """
+    Returns the top emotion label for a given piece of text.
+    Handles truncation to avoid tensor size mismatches.
+    """
     if not text or not text.strip():
         return "neutral"
+
     try:
         classifier = get_emotion_classifier()
-        result = classifier(text)[0]
+        result = classifier(text[:512])[0]  # Extra truncation safeguard
         return result["label"]
     except Exception as e:
         print(f"[Emotion Detection Error]: {e}")
         return "unknown"
 
 def analyze_emotion_and_intent(text: str) -> dict:
+    """
+    Returns emotion + intent flags for context scoring.
+    """
     emotion = detect_emotion(text)
 
+    # Very basic avoidance intent detection
     if any(phrase in text.lower() for phrase in ["later", "maybe", "i don't want to", "not now", "tired", "lazy"]):
         intent = "avoidance"
     else:
@@ -33,10 +47,9 @@ def analyze_emotion_and_intent(text: str) -> dict:
         "intent": intent
     }
 
-def estimate_emotion(text: str):
+def estimate_emotion(text: str) -> tuple[str, float]:
     """
-    Adapter function for use in memory.py.
-    Returns (emotion, intensity).
+    Adapter function for memory systems — returns (emotion, intensity).
     """
     analysis = analyze_emotion_and_intent(text)
     emotion = analysis.get("emotion", "neutral")
@@ -55,6 +68,26 @@ def estimate_emotion(text: str):
     intensity = intensity_map.get(emotion, 0.4)
     return emotion, intensity
 
-def extract_topic_tags(text: str) -> list[str]:
-    # TODO: Replace this with actual NLP-based keyword extraction
-    return ["productivity", "emotion", "motivation"]
+# Load once and cache
+_kw_model = KeyBERT(model="all-MiniLM-L6-v2")
+
+def extract_topic_tags(text: str, top_n: int = 5) -> list[str]:
+    """
+    Extracts meaningful topic tags using KeyBERT.
+    Returns a list of keywords from the input text.
+    """
+    if not text or not text.strip():
+        return []
+
+    try:
+        keywords = _kw_model.extract_keywords(
+            text,
+            keyphrase_ngram_range=(1, 2),
+            stop_words="english",
+            use_maxsum=True,
+            top_n=top_n
+        )
+        return [kw[0] for kw in keywords]
+    except Exception as e:
+        print(f"[Keyword Extraction Error]: {e}")
+        return []

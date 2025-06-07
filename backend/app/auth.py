@@ -1,17 +1,21 @@
 import os
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from bson.objectid import ObjectId
-from app.jwt import create_access_token
+from jose import jwt, JWTError
+from fastapi.security import OAuth2PasswordBearer
 
+# Load environment variables
 load_dotenv()
 
 # Environment variables
 MONGO_URI = os.getenv("MONGO_URI")
-SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
+SECRET_KEY = os.getenv("JWT_SECRET", "supersecret")  # Changed to JWT_SECRET to match .env
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
 # MongoDB setup
 client = MongoClient(MONGO_URI)
@@ -23,6 +27,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # FastAPI router
 router = APIRouter(prefix="/auth", tags=["Auth"])
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 # User creation model
 class UserCreate(BaseModel):
@@ -34,6 +39,22 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+# ✅ Create JWT token
+def create_access_token(data: dict):
+    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
+# ✅ Token verification
+def verify_token(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+        return user_id
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token verification failed")
+
+# ✅ Signup Route
 @router.post("/signup")
 def signup(user: UserCreate):
     if users.find_one({"email": user.email}):
@@ -46,6 +67,7 @@ def signup(user: UserCreate):
     else:
         raise HTTPException(status_code=500, detail="Failed to create user")
 
+# ✅ Login Route
 @router.post("/login")
 def login(user: UserLogin):
     db_user = users.find_one({"email": user.email})
@@ -55,10 +77,11 @@ def login(user: UserLogin):
     token = create_access_token(data={"sub": str(db_user["_id"])})
     return {"access_token": token, "token_type": "bearer"}
 
-# Optional route for debugging
+# ✅ Optional: Check if user exists (debug)
 @router.get("/me/{email}")
 def check_user(email: str):
     user = users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return {"email": user["email"], "id": str(user["_id"])}
+

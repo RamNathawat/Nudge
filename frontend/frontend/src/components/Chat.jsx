@@ -2,43 +2,58 @@ import React, { useState, useEffect, useRef } from "react";
 
 function Chat() {
   const [messages, setMessages] = useState([
-    { sender: "ai", text: "Hey! 😊 I'm Nudge. What's on your mind?", timestamp: new Date() },
+    {
+      sender: "ai",
+      text: "Hey! 😊 I'm Nudge. What's on your mind?",
+      timestamp: new Date(),
+    },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [sessionId, setSessionId] = useState(() => {
-    return localStorage.getItem("nudge_session_id") || null;
-  });
+  const [sessionId, setSessionId] = useState(() =>
+    localStorage.getItem("nudge_session_id")
+  );
+
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
 
   useEffect(() => {
-    if (chatEndRef.current) {
-      chatEndRef.current.scrollIntoView({ behavior: "smooth" });
-    }
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   useEffect(() => {
-    if (!loading && inputRef.current) {
-      inputRef.current.focus();
+    if (!loading) inputRef.current?.focus();
+  }, [loading]);
+
+  const formatTime = (date) => {
+    try {
+      return new Date(date).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return "";
     }
-  }, [loading, messages]);
+  };
 
   const sendMessage = async () => {
     if (!input.trim()) return;
+
+    const userMessage = {
+      sender: "user",
+      text: input.trim(),
+      timestamp: new Date(),
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
     setLoading(true);
     setError(null);
 
-    const userMessage = { sender: "user", text: input.trim(), timestamp: new Date() };
-    setMessages((msgs) => [...msgs, userMessage]);
-    setInput("");
-
     try {
-      const requestBody = {
-        message: userMessage.text,
-        ...(sessionId && { session_id: sessionId }),
-      };
+      const token = localStorage.getItem("access_token");
+      if (!token) throw new Error("No access token found. Please log in again.");
 
       const baseUrl =
         window.location.hostname === "localhost"
@@ -47,14 +62,19 @@ function Chat() {
 
       const response = await fetch(`${baseUrl}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          message: userMessage.text,
+          ...(sessionId && { session_id: sessionId }),
+        }),
       });
 
       if (!response.ok) {
-        const errorDetails = await response.text();
-        console.error("Server error details:", errorDetails);
-        throw new Error(`Nudge backend error: ${response.status}`);
+        const errorText = await response.text();
+        throw new Error(`Backend error ${response.status}: ${errorText}`);
       }
 
       const data = await response.json();
@@ -64,20 +84,23 @@ function Chat() {
         localStorage.setItem("nudge_session_id", data.session_id);
       }
 
-      const aiMessage = {
-        sender: "ai",
-        text: data.response || "Hmm... I didn’t catch that! Try again?",
-        timestamp: new Date(),
-      };
-      setMessages((msgs) => [...msgs, aiMessage]);
-    } catch (err) {
-      setError("Oops! Nudge is having a moment. Please check your connection or try again.");
-      console.error("Fetch error:", err);
-      setMessages((msgs) => [
-        ...msgs,
+      setMessages((prev) => [
+        ...prev,
         {
           sender: "ai",
-          text: "I'm sorry, I couldn't connect right now. Please try again later.",
+          text: data.response || "Hmm... I didn’t catch that. Try again?",
+          timestamp: new Date(),
+        },
+      ]);
+    } catch (err) {
+      console.error("Chat error:", err.message);
+      setError("⚠️ Connection issue. Please check your login or try again.");
+      setMessages((prev) => [
+        ...prev,
+        {
+          sender: "ai",
+          text:
+            "I'm sorry, I couldn't connect right now. Please try again later.",
           timestamp: new Date(),
         },
       ]);
@@ -93,11 +116,7 @@ function Chat() {
     }
   };
 
-  const formatTime = (date) =>
-    date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-
   const styles = {
-    // your original styles...
     appContainer: {
       height: "100vh",
       width: "100vw",
@@ -118,6 +137,7 @@ function Chat() {
       backgroundColor: "#FFFFFF",
       display: "flex",
       flexDirection: "column",
+      minHeight: "300px",
     },
     messageWrapper: (sender) => ({
       width: "100%",
@@ -129,7 +149,10 @@ function Chat() {
       backgroundColor: sender === "user" ? "#FFEFC4" : "#F8F0E0",
       color: "#333333",
       padding: "1.4rem 2rem",
-      borderRadius: sender === "user" ? "25px 25px 8px 25px" : "25px 25px 25px 8px",
+      borderRadius:
+        sender === "user"
+          ? "25px 25px 8px 25px"
+          : "25px 25px 25px 8px",
       maxWidth: "50%",
       wordBreak: "break-word",
       boxShadow: "0 3px 10px rgba(0,0,0,0.08)",
@@ -195,9 +218,13 @@ function Chat() {
         {messages.map((msg, i) => (
           <div key={i} style={styles.messageWrapper(msg.sender)}>
             <div style={styles.messageBubble(msg.sender)}>
-              <div style={styles.senderName}>{msg.sender === "user" ? "YOU" : "NUDGE"}</div>
+              <div style={styles.senderName}>
+                {msg.sender === "user" ? "YOU" : "NUDGE"}
+              </div>
               <div>{msg.text}</div>
-              <div style={styles.messageTime}>{formatTime(msg.timestamp)}</div>
+              <div style={styles.messageTime}>
+                {formatTime(msg.timestamp)}
+              </div>
             </div>
           </div>
         ))}
@@ -222,7 +249,11 @@ function Chat() {
           rows={2}
           style={styles.textArea}
         />
-        <button type="submit" disabled={loading || !input.trim()} style={styles.sendButton}>
+        <button
+          type="submit"
+          disabled={loading || !input.trim()}
+          style={styles.sendButton}
+        >
           {loading ? "Sending..." : "Send"}
         </button>
       </form>

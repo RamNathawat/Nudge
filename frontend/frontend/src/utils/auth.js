@@ -1,11 +1,17 @@
-export function setToken(token) {
-  localStorage.setItem("nudge_token", token);
-}
+// src/utils/auth.js
 
-export function getToken() {
-  return localStorage.getItem("nudge_token");
-}
+export const setToken = (token) => {
+  localStorage.setItem("access_token", token);
+  window.dispatchEvent(new Event("token-change")); // Notify app of token update
+};
 
-export function removeToken() {
-  localStorage.removeItem("nudge_token");
-}
+export const getToken = () => {
+  return localStorage.getItem("access_token");
+};
+
+export const clearToken = () => {
+  localStorage.removeItem("access_token");
+  window.dispatchEvent(new Event("token-change")); // Notify app of token removal
+};
+
+export const removeToken = clearToken; // Alias for logout usage
