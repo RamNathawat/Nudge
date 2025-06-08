@@ -14,6 +14,7 @@ function Chat() {
   const [sessionId, setSessionId] = useState(() =>
     localStorage.getItem("nudge_session_id")
   );
+  const [safeMode, setSafeMode] = useState(false); // <-- Safe mode state
 
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -55,10 +56,7 @@ function Chat() {
       const token = localStorage.getItem("access_token");
       if (!token) throw new Error("No access token found. Please log in again.");
 
-      const baseUrl =
-        window.location.hostname === "localhost"
-          ? "http://localhost:8000"
-          : "https://nudge-z04u.onrender.com";
+      const baseUrl = import.meta.env.VITE_API_URL;
 
       const response = await fetch(`${baseUrl}/chat`, {
         method: "POST",
@@ -69,6 +67,7 @@ function Chat() {
         body: JSON.stringify({
           message: userMessage.text,
           ...(sessionId && { session_id: sessionId }),
+          safe_mode: safeMode, // send safe mode flag here
         }),
       });
 
@@ -150,9 +149,7 @@ function Chat() {
       color: "#333333",
       padding: "1.4rem 2rem",
       borderRadius:
-        sender === "user"
-          ? "25px 25px 8px 25px"
-          : "25px 25px 25px 8px",
+        sender === "user" ? "25px 25px 8px 25px" : "25px 25px 25px 8px",
       maxWidth: "50%",
       wordBreak: "break-word",
       boxShadow: "0 3px 10px rgba(0,0,0,0.08)",
@@ -210,6 +207,21 @@ function Chat() {
       borderRadius: "10px",
       textAlign: "center",
     },
+    safeModeToggle: {
+      display: "flex",
+      alignItems: "center",
+      gap: "0.5rem",
+      fontSize: "0.9rem",
+      color: "#444",
+      cursor: "pointer",
+      userSelect: "none",
+      marginRight: "1rem",
+    },
+    checkbox: {
+      width: "16px",
+      height: "16px",
+      cursor: "pointer",
+    },
   };
 
   return (
@@ -222,9 +234,7 @@ function Chat() {
                 {msg.sender === "user" ? "YOU" : "NUDGE"}
               </div>
               <div>{msg.text}</div>
-              <div style={styles.messageTime}>
-                {formatTime(msg.timestamp)}
-              </div>
+              <div style={styles.messageTime}>{formatTime(msg.timestamp)}</div>
             </div>
           </div>
         ))}
@@ -240,6 +250,17 @@ function Chat() {
         }}
         style={styles.inputForm}
       >
+        {/* Safe Mode Toggle */}
+        <label style={styles.safeModeToggle}>
+          <input
+            type="checkbox"
+            checked={safeMode}
+            onChange={() => setSafeMode((prev) => !prev)}
+            style={styles.checkbox}
+          />
+          Safe Mode
+        </label>
+
         <textarea
           ref={inputRef}
           value={input}

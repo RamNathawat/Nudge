@@ -48,10 +48,9 @@ def compute_repetition_score(user_id, new_message):
     return round(min(count / 5, 1.0), 2)
 
 def get_relevant_memory(user_id):
-    from datetime import datetime
+    now = datetime.utcnow()
     user_entries = list(entries_collection.find({"user_id": user_id}))
     relevant = []
-    now = datetime.utcnow()
 
     for entry in user_entries:
         days_old = (now - entry["timestamp"]).days
@@ -87,3 +86,17 @@ def update_trait(user_id, trait_name, value):
 def get_traits(user_id):
     doc = traits_collection.find_one({"user_id": user_id})
     return doc.get("traits", {}) if doc else {}
+
+def is_safe_space_mode_enabled(user_id):
+    """
+    Check if 'safe space mode' is enabled for the given user.
+    Returns True if enabled, False otherwise.
+    """
+    traits = get_traits(user_id)
+    return traits.get("safe_space_mode", False)
+
+def set_safe_space_mode(user_id, enabled: bool):
+    """
+    Enable or disable 'safe space mode' for a user.
+    """
+    update_trait(user_id, "safe_space_mode", bool(enabled))
