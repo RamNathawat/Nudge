@@ -17,6 +17,7 @@ sentence-transformers
 scikit-learn
 nltk
 spacy
+keybert  # <--- ADD THIS LINE
 
 # MongoDB Client
 pymongo
@@ -26,7 +27,6 @@ typing_extensions
 typing-inspection
 python-jose
 jwt
-pydantic
 bcrypt
 passlib[bcrypt]
 pydantic[email]
