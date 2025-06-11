@@ -1,12 +1,12 @@
 import os, uuid, json, logging, requests
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Query, Path, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 from dotenv import load_dotenv
+from bson import ObjectId
 
-# Load env
 load_dotenv()
 GEMINI_URL = os.getenv("GEMINI_API_URL")
 if not GEMINI_URL:
@@ -44,13 +44,16 @@ conversations: Dict[str, List[Dict[str, str]]] = {}
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+    safe_mode: Optional[bool] = False
+    reply_to_id: Optional[str] = None  # ✅ NEW
 
-# --- Internal imports ---
 from app.auth import verify_token
 from app.memory import (
     get_user_memory, add_message_to_memory, get_recent_history,
     update_trait, get_traits, get_relevant_memory,
-    is_safe_space_mode_enabled, set_safe_space_mode
+    is_safe_space_mode_enabled, set_safe_space_mode,
+    delete_message_by_id, update_message_by_id,
+    entries_collection, traits_collection
 )
 from app.behaviour_analyzer import analyze_behavior, is_emotionally_relevant
 from app.state_inference import infer_emotional_state, summary_emotions
@@ -67,39 +70,46 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
     conversations.setdefault(sid, [SOFT_PROMPT])
 
     user_txt = request.message.strip()
-    add_message_to_memory(user_id=user_id, message=user_txt, sender="user")
 
-    # Check if user is in safe space mode, alter prompt or conversation accordingly
-    safe_space = is_safe_space_mode_enabled(user_id)
+    # ✅ Add user message to memory, support reply_to_id
+    add_message_to_memory(
+        user_id=user_id,
+        message=user_txt,
+        sender="user",
+        reply_to_id=request.reply_to_id
+    )
 
-    # Get emotional context, flags and update traits
+    safe_space = request.safe_mode or is_safe_space_mode_enabled(user_id)
     context_string, flags, emotions = inject_context(user_txt, user_id)
 
-    # Add recent relevant memory for emotional recall and pattern nudging
     for entry in get_relevant_memory(user_id)[:5]:
         conversations[sid].append({
             "role": "user" if entry.get("sender") == "user" else "model",
             "text": entry["content"]
         })
 
-    # If safe space mode is on, use softer prompts, avoid aggressive nudges
     if safe_space:
-        # Optionally insert a system message to keep tone safe
         conversations[sid].insert(1, {
             "role": "system",
             "text": "You are in safe space mode. Be gentle and supportive."
         })
     else:
-        # Insert HARD_PROMPT if emotional flags suggest it and not already present
         if is_emotionally_relevant(user_txt, flags) and HARD_PROMPT not in conversations[sid]:
             conversations[sid].insert(1, HARD_PROMPT)
 
+    # ✅ Inject reply quote if present
+    reply_quote = ""
+    if request.reply_to_id:
+        quoted = entries_collection.find_one({"_id": ObjectId(request.reply_to_id)})
+        if quoted:
+            preview = quoted["content"][:100].strip().replace("\n", " ")
+            reply_quote = f'Replying to: "{preview}"\n\n'
+
     conversations[sid].append({
         "role": "user",
-        "text": f"{user_txt}\n\n(Emotions: {summary_emotions(emotions)} | Traits: {json.dumps(get_traits(user_id))})"
+        "text": f"{reply_quote}{user_txt}\n\n(Emotions: {summary_emotions(emotions)} | Traits: {json.dumps(get_traits(user_id))})"
     })
 
-    # Prepare Gemini payload (limit to last 12 messages to control size)
     payload = {"contents": format_for_gemini(conversations[sid][-12:])}
 
     try:
@@ -113,6 +123,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
 
     conversations[sid].append({"role": "model", "text": formatted_reply})
     add_message_to_memory(user_id=user_id, message=formatted_reply, sender="ai")
+
     score = calculate_nudging_score(emotions, flags, get_traits(user_id))
 
     return Response(
@@ -128,12 +139,43 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
     )
 
 @app.get("/memory")
-async def full_memory(user_id: str = Depends(verify_token)):
-    return get_user_memory(user_id)
+async def paginated_memory(
+    user_id: str = Depends(verify_token),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, gt=0, le=100)
+):
+    return get_user_memory(user_id, offset=offset, limit=limit)
 
 @app.get("/traits")
 async def full_traits(user_id: str = Depends(verify_token)):
     return get_traits(user_id)
+
+@app.delete("/memory/{entry_id}")
+async def delete_memory(entry_id: str, user_id: str = Depends(verify_token)):
+    if delete_message_by_id(user_id, entry_id):
+        return {"message": "Deleted"}
+    raise HTTPException(404, "Message not found or not yours")
+
+@app.patch("/memory/{entry_id}")
+async def update_memory(entry_id: str, body: dict, user_id: str = Depends(verify_token)):
+    if update_message_by_id(user_id, entry_id, body.get("content", "")):
+        return {"message": "Updated"}
+    raise HTTPException(404, "Message not found or not yours")
+
+@app.post("/reset-memory")
+def reset_memory():
+    entries_collection.delete_many({})
+    return {"message": "All memory entries wiped"}
+
+@app.post("/reset-traits")
+def reset_traits():
+    traits_collection.delete_many({})
+    return {"message": "All user traits wiped"}
+
+@app.post("/safe-space-mode")
+def toggle_safe_space(enabled: bool, user_id: str = Depends(verify_token)):
+    set_safe_space_mode(user_id, enabled)
+    return {"status": "ok", "safe_space_mode": enabled}
 
 def inject_context(msg: str, user_id: str):
     flags = analyze_behavior(user_id, msg)
@@ -149,11 +191,4 @@ def inject_context(msg: str, user_id: str):
     )
 
 def format_nudge_reply(text: str) -> str:
-    # Removed length limit, return full reply cleanly
-    if not text:
-        return "..."
-    clean = text.strip().replace("\n\n", "\n")
-    return clean
-
-from app.auth import router as auth_router
-app.include_router(auth_router)
+    return text.strip().replace("\n\n", "\n") if text else "..."
