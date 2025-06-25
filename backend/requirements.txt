@@ -1,0 +1,36 @@
+# Core App Requirements
+fastapi
+uvicorn
+pydantic
+anyio
+python-dotenv
+
+# Async + HTTP Clients
+httpx
+requests
+click
+
+# NLP & ML
+transformers
+torch
+sentence-transformers
+scikit-learn
+nltk
+spacy==3.7.2
+thinc==8.2.2
+keybert
+
+# MongoDB Client
+pymongo
+
+# Utility
+typing_extensions
+typing-inspection
+python-jose
+jwt
+bcrypt
+passlib[bcrypt]
+pydantic[email]
+
+# Pin numpy to 1.x for PyTorch + older spacy compatibility
+numpy<2
