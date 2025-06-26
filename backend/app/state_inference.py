@@ -1,76 +1,104 @@
 import re
 from typing import Dict, List
+from .nlp_analysis import detect_emotion
+from .memory import update_trait, get_traits, get_recent_history
 from .task_topic_inference import infer_task_topic
-from .nlp_analysis import detect_emotion # Import detect_emotion
+import json
+
+# ------------------------------------
+# Emotion & Intent Keyword Maps
+# ------------------------------------
 
 INTENT_KEYWORDS = {
-    "productive": ["build", "create", "focus", "learn", "improve", "study"],
-    "avoidant": ["skip", "delay", "procrastinate", "later"],
-    "recreational": ["relax", "chill", "watch", "hangout"]
+    "productive": ["build", "create", "focus", "learn", "improve", "study", "work", "finish", "complete"],
+    "avoidant": ["skip", "delay", "procrastinate", "later", "lazy", "put off", "not now", "ignore"],
+    "recreational": ["relax", "chill", "watch", "hangout", "movie", "game", "fun", "entertain"]
 }
 
 SUBSTANCE_KEYWORDS = {
-    "weed": ["high", "stoned", "smoke weed"],
-    "alcohol": ["drunk", "booze", "wine", "beer"],
+    "weed": ["high", "stoned", "smoke weed", "blunt", "joint"],
+    "alcohol": ["drunk", "booze", "wine", "beer", "vodka"],
     "nicotine": ["cigarette", "vape", "nicotine", "smoke"]
 }
+
+EMOTION_INTENSITY_MAP = {
+    "joy": 0.9,
+    "sadness": 0.8,
+    "anger": 0.9,
+    "fear": 0.7,
+    "disgust": 0.6,
+    "surprise": 0.6,
+    "neutral": 0.3,
+    "optimism": 0.7,
+    "love": 0.8,
+    "embarrassment": 0.7,
+    "remorse": 0.7,
+    "grief": 0.9,
+    "anxiety": 0.8,
+    "guilt": 0.8,
+    "frustration": 0.7,
+    "boredom": 0.5,
+    "exhaustion": 0.6,
+    "stuck": 0.7,
+    "unknown": 0.2,
+}
+
+# ------------------------------------
+# Keyword-Based State Detection
+# ------------------------------------
 
 def infer_from_keywords(text: str, keyword_map: Dict[str, list], default: str = "unknown") -> str:
     text = text.lower()
     for category, keywords in keyword_map.items():
-        if any(re.search(rf"\b{kw}\b", text) for kw in keywords):
+        if any(re.search(rf"\b{re.escape(kw)}\b", text) for kw in keywords):
             return category
     return default
 
-def infer_emotional_state(message: str) -> Dict[str, float]:
-    """
-    Infers emotional state from the message using the NLP model and assigns intensity.
-    Returns a dictionary of emotions and their intensities.
-    """
-    emotion_label = detect_emotion(message)
-    # This is a simplification; a real system might get scores for multiple emotions
-    # from the NLP model. Here, we map the single detected emotion to an intensity.
+# ------------------------------------
+# Emotion Detection + Trait Update
+# ------------------------------------
 
-    intensity_map = {
-        "joy": {"joy": 0.9},
-        "sadness": {"sadness": 0.8},
-        "anger": {"anger": 0.9},
-        "fear": {"fear": 0.7},
-        "disgust": {"disgust": 0.6},
-        "surprise": {"surprise": 0.6},
-        "neutral": {"neutral": 0.3},
-        "optimism": {"optimism": 0.7}, # Added from common emotion labels
-        "love": {"love": 0.8},
-        "embarrassment": {"embarrassment": 0.7},
-        "remorse": {"remorse": 0.7},
-        "grief": {"grief": 0.9},
-        "anxiety": {"anxiety": 0.8},
-        "guilt": {"guilt": 0.8},
-        "frustration": {"frustration": 0.7},
-        "boredom": {"boredom": 0.5},
-        "exhaustion": {"exhaustion": 0.6}, # Custom mapping for exhaustion
-        "stuck": {"stuck": 0.7}, # Custom mapping for stuck state
-        "unknown": {"unknown": 0.2},
-    }
-    return intensity_map.get(emotion_label, {"neutral": 0.3})
+def infer_emotional_state(message: str, user_id: str = None) -> Dict[str, float]:
+    emotion_label = detect_emotion(message)
+    intensity = EMOTION_INTENSITY_MAP.get(emotion_label, 0.3)
+
+    # ✅ Optional: Track running emotional trends for the user
+    if user_id and emotion_label != "unknown":
+        trait_name = f"emotion_{emotion_label}_count"
+        existing = get_traits(user_id).get(trait_name, 0)
+        update_trait(user_id, trait_name, existing + 1)
+        update_trait(user_id, emotion_label, intensity)
+
+    return {emotion_label: intensity}
+
+# ------------------------------------
+# Human-Like Emotion Summary
+# ------------------------------------
 
 def summary_emotions(emotions: Dict[str, float]) -> str:
-    """
-    Creates a human-readable summary of the inferred emotional state.
-    """
     if not emotions:
-        return "No specific emotions detected."
+        return "No clear emotional signals detected."
 
-    # Find the most prominent emotion
-    most_prominent_emotion = max(emotions, key=emotions.get)
-    intensity = emotions[most_prominent_emotion]
+    dominant = max(emotions, key=emotions.get)
+    score = emotions[dominant]
 
-    if most_prominent_emotion == "neutral" and intensity < 0.5:
-        return "Your emotional state seems neutral."
-    elif most_prominent_emotion in ["joy", "optimism", "love", "surprise"]:
-        return f"You seem to be feeling {most_prominent_emotion} with intensity {intensity:.1f}."
-    else: # Assume other emotions are typically negative or indicate a challenge
-        return f"There are signs of {most_prominent_emotion} with intensity {intensity:.1f}."
+    tone = {
+        "joy": "You're sounding upbeat.",
+        "anger": "There’s frustration in your tone.",
+        "sadness": "You seem down.",
+        "fear": "There's anxiety in your words.",
+        "guilt": "You sound regretful.",
+        "boredom": "You seem disinterested.",
+        "optimism": "You're sounding hopeful.",
+        "exhaustion": "You seem tired.",
+        "unknown": "Your mood's a bit unclear.",
+    }
+
+    return tone.get(dominant, f"Emotion detected: {dominant} ({score:.1f})")
+
+# ------------------------------------
+# User Intent + Topic Summary
+# ------------------------------------
 
 def infer_user_state(message: str) -> Dict[str, str]:
     return {
@@ -78,3 +106,25 @@ def infer_user_state(message: str) -> Dict[str, str]:
         "substance": infer_from_keywords(message, SUBSTANCE_KEYWORDS),
         "task_topic": infer_task_topic(message)
     }
+
+# ------------------------------------
+# Full Context Injection for Gemini
+# ------------------------------------
+
+def inject_context(message: str, user_id: str):
+    from .behaviour_analyzer import analyze_behavior  # Lazy import
+    flags = analyze_behavior(user_id, message)
+    emotions = infer_emotional_state(message, user_id)
+    emotion_summary = summary_emotions(emotions)
+    recent_history = get_recent_history(user_id)
+    traits = get_traits(user_id)
+
+    # ✅ Generate a cleaner, LLM-readable context string:
+    context_str = (
+        f"User Emotional State: {emotion_summary}\n"
+        f"User Traits: {json.dumps(traits)}\n"
+        f"Recent History Snippets: {json.dumps(recent_history[-5:])}\n"
+        f"Behavioral Flags: {flags}"
+    )
+
+    return context_str, flags, emotions

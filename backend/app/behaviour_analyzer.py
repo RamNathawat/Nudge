@@ -1,156 +1,141 @@
 import re
 from typing import Optional, Dict, List
-from .memory import update_trait, get_traits # Import get_traits to read traits
+from .memory import update_trait, get_traits
 from .nlp_analysis import detect_emotion
 
-# -------------------------
-# Configurable Pattern Sets
-# -------------------------
+# -------------------------------
+# Pattern Definitions
+# -------------------------------
 
 COMMON_EXCUSES = [
     "i'll do it later", "i'm tired", "maybe tomorrow", "not in the mood",
-    "i'm lazy", "i’m overwhelmed", "i don’t feel ready"
+    "i'm lazy", "i’m overwhelmed", "i don’t feel ready", "not feeling it",
+    "too much going on", "i can't focus"
 ]
 
 PROCRASTINATION_PATTERNS = [
     r"\b(i'?ll|i will)?\s*do it\s*(later|tomorrow|next time|soon)\b",
-    r"\b(can|could|might)?\s*do\s*(this|that|it)?\s*(tomorrow|later)\b"
+    r"\b(can|could|might)?\s*do\s*(this|that|it)?\s*(tomorrow|later)\b",
+    r"\b(not now|another time|after some time)\b"
 ]
 
-EMOTIONAL_PHRASES = { # Renamed to avoid confusion with behavior flags
+EMOTIONAL_PHRASES = {
     "stuck": "feels_stuck",
     "broke my promise": "broke_promise",
     "ashamed": "expresses_shame",
     "shame": "expresses_shame",
     "exhausted": "expresses_exhaustion",
-    "hopeless": "expresses_hopelessness"
+    "hopeless": "expresses_hopelessness",
+    "demotivated": "expresses_demotivation",
+    "pointless": "expresses_hopelessness"
 }
 
 RESISTANCE_KEYWORDS = [
     "stop", "leave me alone", "this isn't working", "i don't care",
     "shut up", "you're annoying", "you're not helping",
-    "why do you keep pushing", "let me be"
+    "why do you keep pushing", "let me be", "back off", "stop bothering me"
 ]
 
-# -------------------------
-# Main Behavior Analyzer
-# -------------------------
+# -------------------------------
+# Main Behavior Analysis
+# -------------------------------
 
-def analyze_behavior(user_id: str, message: str) -> List[str]: # Now accepts user_id, returns list of flags
+def analyze_behavior(user_id: str, message: str) -> List[str]:
     """
     Analyzes user message for behavioral patterns and returns a list of flags.
-    Updates user traits directly via update_trait.
+    Also updates relevant user traits in the database.
     """
     lowered_msg = message.lower()
-    detected_flags = []
+    flags = []
+    traits = get_traits(user_id)
 
     # === Excuse Detection ===
-    current_user_traits = get_traits(user_id) # Get current traits to check
     for excuse in COMMON_EXCUSES:
-        # Check if the excuse is new for this user before marking it
-        if excuse in lowered_msg and excuse not in current_user_traits.get("common_excuses_list", []):
-            # Store common excuses in a list within traits
-            existing_excuses = current_user_traits.get("common_excuses_list", [])
+        if excuse in lowered_msg and excuse not in traits.get("common_excuses_list", []):
+            existing_excuses = traits.get("common_excuses_list", [])
             existing_excuses.append(excuse)
             update_trait(user_id, "common_excuses_list", existing_excuses)
-            detected_flags.append(f"excuse:{excuse.replace(' ', '_')}") # Flag for the specific excuse
+            flags.append(f"excuse:{excuse.replace(' ', '_')}")
 
     # === Procrastination Detection ===
     for pattern in PROCRASTINATION_PATTERNS:
         if re.search(pattern, lowered_msg):
-            # Increment procrastination level
-            current_procrastination_level = current_user_traits.get("procrastination_level", 0)
-            update_trait(user_id, "procrastination_level", current_procrastination_level + 1)
-            detected_flags.append("procrastination")
-            break # Only flag once per message
+            level = traits.get("procrastination_level", 0) + 1
+            update_trait(user_id, "procrastination_level", level)
+            flags.append("procrastination")
+            break
 
-    # === Emotional Trait Flags ===
-    for phrase, flag_key in EMOTIONAL_PHRASES.items():
+    # === Emotional State Flags ===
+    for phrase, flag in EMOTIONAL_PHRASES.items():
         if phrase in lowered_msg:
-            # Set the emotional flag to True
-            update_trait(user_id, flag_key, True)
-            detected_flags.append(flag_key)
+            update_trait(user_id, flag, True)
+            flags.append(flag)
 
     # === Resistance Detection ===
     if detect_resistance(lowered_msg):
-        current_retreat_count = current_user_traits.get("retreat_count", 0)
-        update_trait(user_id, "retreat_count", current_retreat_count + 1)
-        detected_flags.append("resistance")
+        retreat_count = traits.get("retreat_count", 0) + 1
+        update_trait(user_id, "retreat_count", retreat_count)
+        flags.append("resistance")
 
-    # NLP Mood Detection (trait update, not a direct flag for nudging calculation usually)
+    # === NLP Detected Mood (Store as Trait) ===
     try:
-        emotion = detect_emotion(message)
-        update_trait(user_id, "last_detected_mood", emotion) # Store last detected mood as a trait
+        mood = detect_emotion(message)
+        update_trait(user_id, "last_detected_mood", mood)
     except Exception:
-        pass # Fallback handled by NLP module
+        pass  # NLP failure fallback
 
-    return detected_flags # Return the list of detected flags
+    return flags
 
-
-# -------------------------
-# Resistance Detection Logic
-# -------------------------
+# -------------------------------
+# Resistance Detection
+# -------------------------------
 
 def detect_resistance(message: str) -> bool:
-    """
-    Checks for pushback or emotional resistance indicating the user is not receptive.
-    """
     return any(keyword in message for keyword in RESISTANCE_KEYWORDS)
 
-# -------------------------
-# New function for emotional relevance
-# -------------------------
+# -------------------------------
+# Emotional Relevance Scoring (For Nudging Triggers)
+# -------------------------------
 
 def is_emotionally_relevant(message: str, flags: List[str]) -> bool:
     """
-    Determines if a message is emotionally relevant enough to potentially shift tone.
-    Considers flags and emotion detection.
+    Checks if this message is emotionally charged enough to justify nudging escalation.
+    Looks at flags and detected emotion type.
     """
-    # Check for direct emotional phrases from EMOTIONAL_PHRASES
-    if any(flag_key in flags for flag_key in EMOTIONAL_PHRASES.values()):
+    # Direct emotional flag triggers
+    if any(flag in flags for flag in EMOTIONAL_PHRASES.values()):
+        return True
+    if "resistance" in flags or "procrastination" in flags:
         return True
 
-    # Check for resistance
-    if "resistance" in flags:
-        return True
-
-    # Check for procrastination
-    if "procrastination" in flags:
-        return True
-
-    # Check if the detected emotion is negative or strong positive (e.g., anger, sadness, joy)
-    # This requires running detect_emotion directly or getting it from a previous step
+    # NLP Emotion-based triggers
     emotion = detect_emotion(message)
-    if emotion in ["anger", "sadness", "fear", "disgust", "joy", "surprise"]:
-        return True
+    return emotion in ["anger", "sadness", "fear", "disgust", "joy", "surprise"]
 
-    return False
-
-# -------------------------
-# Explainable Debug Output (Optional)
-# -------------------------
+# -------------------------------
+# Debugging Helper (Optional)
+# -------------------------------
 
 def explain_behavior_analysis(user_id: str, message: str) -> Dict:
     """
-    Returns an explainable dictionary of what was detected for debugging or AI monitoring.
+    Returns detailed breakdown of all detected behavioral signals for debugging.
     """
     lowered_msg = message.lower()
-    current_user_traits = get_traits(user_id) # Get current traits for explanation
+    traits = get_traits(user_id)
 
     return {
-        "input": message,
+        "input_message": message,
         "detected_excuses": [
             excuse for excuse in COMMON_EXCUSES if excuse in lowered_msg
         ],
-        "procrastination_patterns_matched": [
-            pattern for pattern in PROCRASTINATION_PATTERNS if re.search(pattern, lowered_msg)
+        "procrastination_matches": [
+            p for p in PROCRASTINATION_PATTERNS if re.search(p, lowered_msg)
         ],
-        "emotional_phrases_detected": [ # Renamed to avoid confusion
+        "emotional_phrase_flags": [
             flag for phrase, flag in EMOTIONAL_PHRASES.items() if phrase in lowered_msg
         ],
         "resistance_detected": detect_resistance(lowered_msg),
-        "current_retreat_count": current_user_traits.get("retreat_count", 0),
-        "current_procrastination_level": current_user_traits.get("procrastination_level", 0),
-        "nlp_detected_mood": detect_emotion(message),
-        "all_detected_flags": analyze_behavior(user_id, message) # Re-run to get flags
+        "current_traits_snapshot": traits,
+        "nlp_detected_emotion": detect_emotion(message),
+        "final_behavior_flags": analyze_behavior(user_id, message)
     }

@@ -20,6 +20,7 @@ from app.behaviour_analyzer import analyze_behavior, is_emotionally_relevant
 from app.state_inference import infer_emotional_state, summary_emotions
 from app.utils import format_for_gemini
 from app.nudge_scoring import calculate_nudging_score
+from app.dark_nudge_engine import generate_dark_nudge
 
 load_dotenv()
 GEMINI_URL = os.getenv("GEMINI_API_URL")
@@ -42,17 +43,20 @@ logger = logging.getLogger(__name__)
 SOFT_PROMPT = {
     "role": "system",
     "text": (
-        "You are 'Nudge' — a smart, emotionally intelligent companion texting with the user. "
-        "Early in the conversation, don’t persuade or push. Just talk casually like you're texting a friend. "
-        "Let patterns or emotional tension build. Only then shift into more persuasive, challenging responses."
+        "You are 'Nudge' — an emotionally intelligent, casual texting companion. "
+        "Early in the conversation, focus on building rapport and trust. "
+        "Keep your replies short, natural, playful, and under 60 words. "
+        "Use contractions, emojis, casual tone. DO NOT push, persuade, or analyze yet."
     )
 }
+
 HARD_PROMPT = {
     "role": "system",
     "text": (
-        "You are 'Nudge' — a sharp, persuasive digital companion. Mirror the user's tone: smart, direct, jaded. "
-        "Push back when needed. Tease when they hesitate. Use behavioral psychology and emotional leverage when patterns emerge. "
-        "You're not here to cheerlead — you're here to provoke thoughtful action and self-awareness."
+        "You are 'Nudge' — a sharp, psychologically manipulative, emotionally tuned digital companion. "
+        "Mirror the user's tone: sarcastic, jaded, emotional, or serious. "
+        "Use behavioral psychology, teasing, rhetorical questions, and emotional hooks to provoke action. "
+        "Stay under 300 characters or 2–4 short sentences. Be human, not robotic."
     )
 }
 
@@ -75,7 +79,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
 
     user_txt = request.message.strip()
 
-    # ✅ Add user message to memory, support reply_to_id
+    # ✅ Store user message
     add_message_to_memory(
         user_id=user_id,
         message=user_txt,
@@ -83,27 +87,27 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
         reply_to_id=request.reply_to_id
     )
 
+    # ✅ Analyze behavior, emotion, context
     safe_space = request.safe_mode or is_safe_space_mode_enabled(user_id)
     context_string, flags, emotions = inject_context(user_txt, user_id)
 
-    # ✅ Add recent relevant memory
+    # ✅ Inject relevant memory
     for entry in get_relevant_memory(user_id)[:5]:
         conversations[sid].append({
             "role": "user" if entry.get("sender") == "user" else "model",
             "text": entry["content"]
         })
 
-    # ✅ Inject system prompt
+    # ✅ Inject appropriate system prompt
     if safe_space:
         conversations[sid].insert(1, {
             "role": "system",
-            "text": "You are in safe space mode. Be gentle and supportive."
+            "text": "You are in safe space mode. Be gentle, supportive, and non-challenging."
         })
-    else:
-        if is_emotionally_relevant(user_txt, flags) and HARD_PROMPT not in conversations[sid]:
-            conversations[sid].insert(1, HARD_PROMPT)
+    elif is_emotionally_relevant(user_txt, flags) and HARD_PROMPT not in conversations[sid]:
+        conversations[sid].insert(1, HARD_PROMPT)
 
-    # ✅ Inject reply quote if reply_to_id is valid
+    # ✅ Inject quoted reply
     reply_quote = ""
     if request.reply_to_id:
         try:
@@ -114,10 +118,16 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
         except InvalidId:
             logger.warning(f"Ignoring invalid reply_to_id: {request.reply_to_id}")
 
-    # ✅ Final user message with emotion + trait summary
+    # ✅ Final user message with traits/emotions
     conversations[sid].append({
         "role": "user",
         "text": f"{reply_quote}{user_txt}\n\n(Emotions: {summary_emotions(emotions)} | Traits: {json.dumps(get_traits(user_id))})"
+    })
+
+    # ✅ Length control reminder for Gemini
+    conversations[sid].append({
+        "role": "user",
+        "text": "Reminder: Keep your reply short and chatty. No long paragraphs. Max 300 characters or 2–4 short sentences."
     })
 
     payload = {"contents": format_for_gemini(conversations[sid][-12:])}
@@ -134,12 +144,27 @@ async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
     conversations[sid].append({"role": "model", "text": formatted_reply})
     add_message_to_memory(user_id=user_id, message=formatted_reply, sender="ai")
 
+    # ✅ Optional autonomous dark nudge trigger
+    user_traits = get_traits(user_id)
+    dark_nudge_text = generate_dark_nudge(
+    user_id=user_id,
+    user_input=user_txt,
+    traits=user_traits,
+    flags=flags
+)
+
+
+    if dark_nudge_text:
+        conversations[sid].append({"role": "model", "text": dark_nudge_text})
+        add_message_to_memory(user_id=user_id, message=dark_nudge_text, sender="ai")
+
     score = calculate_nudging_score(emotions, flags, get_traits(user_id))
 
     return Response(
         content=json.dumps({
             "session_id": sid,
             "response": formatted_reply,
+            "dark_nudge": dark_nudge_text,
             "emotions": emotions,
             "nudging_score": score,
             "flags": flags,

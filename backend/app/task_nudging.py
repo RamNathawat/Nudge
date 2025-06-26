@@ -1,19 +1,26 @@
 from datetime import datetime, timedelta
-from .memory import load_memory
+from typing import List, Dict, Optional
 from .nlp_analysis import is_task_like_message
+from .memory import entries_collection
 
 # Thresholds
 AVOIDANCE_REPETITION_THRESHOLD = 2
 AVOIDANCE_TIME_THRESHOLD_DAYS = 3
 
-def infer_ongoing_tasks(user_id):
-    memory = load_memory().get(user_id, [])
+def infer_ongoing_tasks(user_id: str) -> List[Dict]:
+    """
+    Analyzes user's memory to find tasks they keep mentioning but avoiding.
+    """
+    memory_entries = list(entries_collection.find({"user_id": user_id}).sort("timestamp", -1))
+
     task_candidates = {}
 
-    for m in memory:
-        if not is_task_like_message(m["content"]):
+    for m in memory_entries:
+        content = m.get("content", "")
+        if not is_task_like_message(content):
             continue
-        task = m["task_reference"] or infer_task_from_text(m["content"])
+
+        task = m.get("task_reference") or infer_task_from_text(content)
         if not task:
             continue
 
@@ -28,9 +35,9 @@ def infer_ongoing_tasks(user_id):
 
         info = task_candidates[task]
         info["messages"].append(m)
-        msg_time = datetime.fromisoformat(m["timestamp"])
-        if msg_time > info["last_mentioned"]:
-            info["last_mentioned"] = msg_time
+        timestamp = m.get("timestamp")
+        if isinstance(timestamp, datetime) and timestamp > info["last_mentioned"]:
+            info["last_mentioned"] = timestamp
         info["repetitions"] += 1
         info["emotion_total"] += m.get("emotional_intensity", 0.0)
         info["emotion_count"] += 1
@@ -40,10 +47,12 @@ def infer_ongoing_tasks(user_id):
         if data["emotion_count"] == 0:
             continue
         avg_emotion = data["emotion_total"] / data["emotion_count"]
-        days_since_last = (datetime.now() - data["last_mentioned"]).days
+        days_since_last = (datetime.utcnow() - data["last_mentioned"]).days if data["last_mentioned"] != datetime.min else 999
 
-        if (data["repetitions"] >= AVOIDANCE_REPETITION_THRESHOLD and 
-            days_since_last >= AVOIDANCE_TIME_THRESHOLD_DAYS):
+        if (
+            data["repetitions"] >= AVOIDANCE_REPETITION_THRESHOLD and
+            days_since_last >= AVOIDANCE_TIME_THRESHOLD_DAYS
+        ):
             tasks.append({
                 "task": task,
                 "avg_emotion": avg_emotion,
@@ -54,18 +63,22 @@ def infer_ongoing_tasks(user_id):
 
     return sorted(tasks, key=lambda t: t["nudge_intensity"], reverse=True)
 
-def infer_task_from_text(text):
+def infer_task_from_text(text: str) -> Optional[str]:
     keywords = ["start", "finish", "build", "launch", "clean", "workout", "quit", "study", "submit"]
     for word in keywords:
         if word in text.lower():
             return text.strip()
     return None
 
-def compute_nudge_urgency(reps, emotion, days_inactive):
-    urgency = 0.4 * min(reps / 5, 1) + 0.3 * min(days_inactive / 7, 1) + 0.3 * min(emotion, 1)
+def compute_nudge_urgency(reps: int, emotion: float, days_inactive: int) -> float:
+    urgency = (
+        0.4 * min(reps / 5, 1) +
+        0.3 * min(days_inactive / 7, 1) +
+        0.3 * min(emotion, 1)
+    )
     return round(urgency, 2)
 
-def generate_task_nudge(task_data):
+def generate_task_nudge(task_data: Dict) -> str:
     task = task_data["task"]
     intensity = task_data["nudge_intensity"]
 

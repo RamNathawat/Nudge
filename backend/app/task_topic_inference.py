@@ -1,58 +1,72 @@
-# app/task_topic_inference.py
-
 import re
+from typing import Dict
 
 def infer_task_topic(text: str) -> str:
     """
-    Infer the task topic from message text.
+    Infer the user's current task or topic area from text.
+    Supports broader slang, synonyms, and casual language patterns.
     """
     lower = text.lower()
 
-    # Task Topic Detection
-    if any(kw in lower for kw in ["gym", "workout", "diet", "fit", "exercise", "body"]):
-        topic = "health"
-    elif any(kw in lower for kw in ["money", "spend", "save", "income", "salary", "debt", "budget"]):
-        topic = "finance"
-    elif any(kw in lower for kw in ["project", "code", "app", "build", "website", "startup", "feature"]):
-        topic = "career"
-    elif any(kw in lower for kw in ["relationship", "talk", "crush", "heart", "feelings"]):
-        topic = "relationship"
-    elif any(kw in lower for kw in ["study", "exam", "college", "test", "assignment", "homework"]):
-        topic = "education"
-    else:
-        topic = "unknown"
-    return topic
+    topic_patterns = {
+        "health": [
+            r"\b(gym|workout|work out|fitness|diet|calorie|body|exercise|run|cardio|lift|training)\b"
+        ],
+        "finance": [
+            r"\b(money|spend|saving|save|budget|income|salary|paycheck|debt|bills|invest)\b"
+        ],
+        "career": [
+            r"\b(project|code|coding|build|app|website|startup|deploy|feature|job|work|deliverable|launch)\b"
+        ],
+        "relationship": [
+            r"\b(relationship|crush|girlfriend|boyfriend|talk to|texting|love|feelings|date|romantic)\b"
+        ],
+        "education": [
+            r"\b(study|exam|assignment|homework|college|test|school|lecture|revision|syllabus)\b"
+        ],
+        "creative": [
+            r"\b(write|draw|paint|music|song|creative|design|art|poem|lyrics|sketch)\b"
+        ],
+        "chores": [
+            r"\b(clean|dishes|laundry|groceries|housework|organize|cook|shopping)\b"
+        ],
+    }
 
-def infer_user_state(text: str) -> dict:
+    for topic, patterns in topic_patterns.items():
+        for pattern in patterns:
+            if re.search(pattern, lower):
+                return topic
+
+    return "unknown"
+
+def infer_user_state(text: str) -> Dict[str, str]:
     """
-    Infer user intent, substance use, and task topic from message text.
-    Returns: dict with intent, substance, and task_topic.
-    (This function was previously provided by you, kept for completeness)
+    Infer user intent, substance usage, and task topic from text.
+    Uses loose matching for casual language.
     """
+
     lower = text.lower()
 
-    # Substance Detection
-    if any(kw in lower for kw in ["weed", "joint", "high", "stoned"]):
+    # Substance Use Detection
+    substance = "none"
+    if any(kw in lower for kw in ["weed", "joint", "high", "stoned", "blunt", "pot"]):
         substance = "weed"
-    elif any(kw in lower for kw in ["alcohol", "drunk", "booze", "beer", "vodka"]):
+    elif any(kw in lower for kw in ["alcohol", "drunk", "booze", "beer", "vodka", "whiskey", "wine", "shots"]):
         substance = "alcohol"
-    elif any(kw in lower for kw in ["cigarette", "nicotine", "smoke", "vape"]):
+    elif any(kw in lower for kw in ["cigarette", "nicotine", "smoke", "vape", "puff", "hookah"]):
         substance = "nicotine"
-    else:
-        substance = "none"
 
     # Intent Detection
-    if any(kw in lower for kw in ["procrastinate", "delay", "skip", "avoid"]):
+    intent = "unknown"
+    if any(kw in lower for kw in ["procrastinate", "delay", "skip", "avoid", "put off", "later", "postpone"]):
         intent = "avoidant"
-    elif any(kw in lower for kw in ["finish", "complete", "do this", "get done", "start working"]):
+    elif any(kw in lower for kw in ["finish", "complete", "get done", "start working", "begin", "knock this out", "focus", "grind"]):
         intent = "productive"
-    elif any(kw in lower for kw in ["chill", "relax", "watch", "game", "movie", "binge"]):
+    elif any(kw in lower for kw in ["chill", "relax", "watch", "binge", "game", "movie", "hangout", "scroll", "waste time"]):
         intent = "recreational"
-    else:
-        intent = "unknown"
 
     return {
         "intent": intent,
         "substance": substance,
-        "task_topic": infer_task_topic(text) # Use the specific infer_task_topic
+        "task_topic": infer_task_topic(text)
     }

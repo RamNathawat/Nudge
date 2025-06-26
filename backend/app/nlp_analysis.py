@@ -1,7 +1,14 @@
 from functools import lru_cache
 from transformers import pipeline, Pipeline
-from transformers.pipelines.pt_utils import KeyDataset
 from keybert import KeyBERT
+from typing import Dict, List, Tuple
+import re
+
+from .task_topic_inference import infer_task_topic
+
+# ---------------------
+# Emotion Detection
+# ---------------------
 
 @lru_cache(maxsize=1)
 def get_emotion_classifier() -> Pipeline:
@@ -10,49 +17,31 @@ def get_emotion_classifier() -> Pipeline:
         model="j-hartmann/emotion-english-distilroberta-base",
         tokenizer="j-hartmann/emotion-english-distilroberta-base",
         return_all_scores=False,
-        truncation=True,       # ✅ Ensures long inputs are safely truncated
-        max_length=512         # ✅ Limit to model max token limit
+        truncation=True,
+        max_length=512
     )
 
 def detect_emotion(text: str) -> str:
     """
-    Returns the top emotion label for a given piece of text.
-    Handles truncation to avoid tensor size mismatches.
+    Returns the dominant emotion label for the given text.
+    Falls back to 'neutral' or 'unknown' on error.
     """
     if not text or not text.strip():
         return "neutral"
 
     try:
         classifier = get_emotion_classifier()
-        result = classifier(text[:512])[0]  # Extra truncation safeguard
-        return result["label"]
+        result = classifier(text[:512])[0]
+        return result.get("label", "unknown").lower()
     except Exception as e:
         print(f"[Emotion Detection Error]: {e}")
         return "unknown"
 
-def analyze_emotion_and_intent(text: str) -> dict:
+def estimate_emotion(text: str) -> Tuple[str, float]:
     """
-    Returns emotion + intent flags for context scoring.
+    Estimates emotion label + intensity score (for salience, storage, or memory).
     """
     emotion = detect_emotion(text)
-
-    # Very basic avoidance intent detection
-    if any(phrase in text.lower() for phrase in ["later", "maybe", "i don't want to", "not now", "tired", "lazy"]):
-        intent = "avoidance"
-    else:
-        intent = "engagement"
-
-    return {
-        "emotion": emotion.lower(),
-        "intent": intent
-    }
-
-def estimate_emotion(text: str) -> tuple[str, float]:
-    """
-    Adapter function for memory systems — returns (emotion, intensity).
-    """
-    analysis = analyze_emotion_and_intent(text)
-    emotion = analysis.get("emotion", "neutral")
 
     intensity_map = {
         "joy": 0.9,
@@ -65,16 +54,18 @@ def estimate_emotion(text: str) -> tuple[str, float]:
         "neutral": 0.3,
         "unknown": 0.2,
     }
-    intensity = intensity_map.get(emotion, 0.4)
-    return emotion, intensity
 
-# Load once and cache
+    return emotion, intensity_map.get(emotion, 0.4)
+
+# ---------------------
+# Topic Extraction
+# ---------------------
+
 _kw_model = KeyBERT(model="all-MiniLM-L6-v2")
 
-def extract_topic_tags(text: str, top_n: int = 5) -> list[str]:
+def extract_topic_tags(text: str, top_n: int = 5) -> List[str]:
     """
-    Extracts meaningful topic tags using KeyBERT.
-    Returns a list of keywords from the input text.
+    Extract key topic tags using KeyBERT.
     """
     if not text or not text.strip():
         return []
@@ -91,3 +82,48 @@ def extract_topic_tags(text: str, top_n: int = 5) -> list[str]:
     except Exception as e:
         print(f"[Keyword Extraction Error]: {e}")
         return []
+
+# ---------------------
+# Intent and Substance Keyword Inference
+# ---------------------
+
+INTENT_KEYWORDS = {
+    "productive": ["build", "create", "focus", "learn", "improve", "study"],
+    "avoidant": ["skip", "delay", "procrastinate", "later"],
+    "recreational": ["relax", "chill", "watch", "hangout"]
+}
+
+SUBSTANCE_KEYWORDS = {
+    "weed": ["high", "stoned", "smoke weed"],
+    "alcohol": ["drunk", "booze", "wine", "beer"],
+    "nicotine": ["cigarette", "vape", "nicotine", "smoke"]
+}
+
+def infer_from_keywords(text: str, keyword_map: Dict[str, List[str]], default: str = "unknown") -> str:
+    """
+    Infers category (like intent or substance) based on presence of keywords.
+    """
+    text = text.lower()
+    for category, keywords in keyword_map.items():
+        if any(re.search(rf"\b{kw}\b", text) for kw in keywords):
+            return category
+    return default
+
+def infer_user_state(message: str) -> Dict[str, str]:
+    """
+    Infers user's intent, possible substance use, and task topic.
+    """
+    return {
+        "intent": infer_from_keywords(message, INTENT_KEYWORDS),
+        "substance": infer_from_keywords(message, SUBSTANCE_KEYWORDS),
+        "task_topic": infer_task_topic(message)
+    }
+def is_task_like_message(text: str) -> bool:
+    """
+    Simple heuristic: Checks if the message looks like a task or goal statement.
+    """
+    task_keywords = [
+        "need to", "have to", "should", "must", "plan to", "goal", "target", "want to", "finish", "start", "complete"
+    ]
+    lower = text.lower()
+    return any(kw in lower for kw in task_keywords)
