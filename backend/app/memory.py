@@ -1,13 +1,15 @@
 from datetime import datetime
 from pymongo import MongoClient
-from bson import ObjectId
+from bson import ObjectId # Ensure ObjectId is imported for json_serializer_for_mongo_types
 from bson.errors import InvalidId
 from dotenv import load_dotenv
 import os
+import json # Added: needed for json_serializer_for_mongo_types if not already imported
+from typing import List, Dict # Added: for type hints if not already present
 
 from .models import MemoryEntry
 from .nlp_analysis import extract_topic_tags, estimate_emotion
-from .utils import safe_bson_date
+from .utils import safe_bson_date # Keep this import for safe_bson_date from utils
 
 load_dotenv()
 
@@ -56,16 +58,15 @@ def add_message_to_memory(user_id, message, sender="user", task_reference=None, 
         reply_to_id=reply_to_id
     ).dict()
 
-    entries_collection.insert_one(new_entry)
+    result = entries_collection.insert_one(new_entry)
+    return str(result.inserted_id)
 
 def compute_salience(emotion, intensity, message, tags):
     return round(len(message) / 50 + intensity * 2 + 0.2 * len(tags), 2)
 
 def compute_repetition_score(user_id, new_message):
     user_entries = list(entries_collection.find({"user_id": user_id}))
-    count = sum(
-        1 for m in user_entries if new_message.strip().lower() in m["content"].strip().lower()
-    )
+    count = sum(1 for m in user_entries if new_message.strip().lower() in m["content"].strip().lower())
     return round(min(count / 5, 1.0), 2)
 
 def get_relevant_memory(user_id):
@@ -74,35 +75,15 @@ def get_relevant_memory(user_id):
     relevant = []
 
     for entry in user_entries:
+        # Using safe_bson_date from .utils module
         entry_ts = safe_bson_date(entry.get("timestamp"))
+        
+        # Ensure entry_ts is a datetime object before calculating days_old
         if entry_ts:
-            try:
-                days_old = (now - entry_ts).days
-            except Exception:
-                days_old = MEMORY_DECAY_DAYS
+            days_old = (now - entry_ts).days
         else:
-            days_old = MEMORY_DECAY_DAYS
+            days_old = MEMORY_DECAY_DAYS # Fallback if timestamp is missing or invalid
 
-        decay = max(0.0, 1.0 - days_old / MEMORY_DECAY_DAYS)
-        weight = (
-            entry.get("salience", 0) * 0.4 +
-            entry.get("emotional_intensity", 0) * 0.4 +
-            entry.get("repetition_score", 0) * 0.2
-        ) * decay
-
-        if weight > 0.25:
-            relevant.append((weight, entry))
-
-    relevant.sort(key=lambda x: x[0], reverse=True)
-    return [e for _, e in relevant]
-
-    now = datetime.utcnow()
-    user_entries = list(entries_collection.find({"user_id": user_id}))
-    relevant = []
-
-    for entry in user_entries:
-        entry_ts = safe_bson_date(entry.get("timestamp"))
-        days_old = (now - entry_ts).days if entry_ts else MEMORY_DECAY_DAYS
         decay = max(0.0, 1.0 - days_old / MEMORY_DECAY_DAYS)
         weight = (
             entry.get("salience", 0) * 0.4 +
@@ -128,7 +109,7 @@ def get_user_memory(user_id, offset=0, limit=20):
         entries.append({
             **entry,
             "_id": str(entry["_id"]),
-            "timestamp": entry.get("timestamp").isoformat() if entry.get("timestamp") else None,
+            "timestamp": entry.get("timestamp").isoformat() + "Z" if entry.get("timestamp") else None,
         })
 
     has_more = (offset + len(entries)) < total_count
@@ -139,8 +120,16 @@ def get_user_memory(user_id, offset=0, limit=20):
         "totalMessages": total_count
     }
 
-def get_recent_history(user_id):
-    return [e["content"] for e in get_relevant_memory(user_id)[:5]]
+def get_recent_history(user_id: str, limit: int = 50):
+    cursor = entries_collection.find({"user_id": user_id}).sort("timestamp", -1).limit(limit)
+    history = []
+    for doc in cursor:
+        history.append({
+            "content": doc.get("content", ""),
+            "sender": doc.get("sender", ""),
+            "timestamp": doc.get("timestamp").isoformat() + "Z" if doc.get("timestamp") else None,
+        })
+    return history[::-1]
 
 # ------------------------
 # Trait System
@@ -183,7 +172,6 @@ def delete_message_by_id(user_id, message_id):
     try:
         obj_id = ObjectId(message_id)
     except InvalidId:
-        # If frontend sent a temp ID like "temp-user-xxx", don't crash, just return False
         return False
 
     result = entries_collection.delete_one({
@@ -203,3 +191,14 @@ def update_message_by_id(user_id, message_id, new_content):
         {"$set": {"content": new_content}}
     )
     return result.modified_count == 1
+
+# Added: json_serializer_for_mongo_types function
+def json_serializer_for_mongo_types(obj):
+    """
+    JSON serializer for objects not serializable by default json code
+    """
+    if isinstance(obj, ObjectId):
+        return str(obj) # Convert ObjectId to string
+    if isinstance(obj, datetime):
+        return obj.isoformat() # Convert datetime to ISO format string
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")

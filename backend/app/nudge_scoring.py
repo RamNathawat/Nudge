@@ -1,136 +1,177 @@
 # app/nudge_scoring.py
+import random
+from typing import Optional, List, Dict
+from datetime import datetime, timedelta
+from .memory import get_recent_history, get_traits, update_trait
+from .behaviour_analyzer import is_emotionally_relevant
+from .nlp_analysis import detect_emotion, is_task_like_message # Removed is_question
+from .dark_nudge_engine import generate_dark_nudge # Not used here, removing for clarity
 
-from typing import Dict, List, Any
-
-# Emotion weight multipliers (psychological impact level)
-EMOTION_WEIGHTS = {
-    "anxiety": 1.2,
-    "guilt": 1.5,
-    "shame": 1.5,
-    "frustration": 1.3,
-    "sadness": 1.1,
-    "anger": 1.4,
-    "hopelessness": 1.7,
-    "avoidance": 1.3,
-    "boredom": 0.9,
-    "confidence": -0.5,    # Reduces nudge need
-    "motivation": -1.0,    # High motivation = Less nudge
-    "joy": -0.3,
-    "optimism": -0.4,
+# ----------------------------------
+# Scoring Parameters (Adjust these weights)
+# ----------------------------------
+WEIGHTS = {
+    "emotional_relevance": 0.3,
+    "procrastination": 0.2,
+    "resistance": 0.2,
+    "user_engagement": 0.1,
+    "nudge_fatigue": -0.2, # Negative weight for fatigue
+    "safe_space_mode": -1.0, # Strong negative weight if safe space is on
+    "task_relevance": 0.2 # New weight for task-related nudging
 }
 
-# Behavior flag multipliers (trigger factors)
-FLAG_WEIGHTS = {
-    "procrastination": 1.2,
-    "avoidance": 1.3,
-    "guilt-tripping": 1.0,
-    "resistance": 1.5,
-    "disengagement": 1.4,
-    "stuck": 1.3,
-    "ego-defensive": 1.1,
-    "self-deception": 1.6,
-    "excuse": 1.1,  # General excuse flag if present
-}
-
-# Personality trait weights (chronic patterns)
-TRAIT_WEIGHTS = {
-    "avoidant": 1.2,
-    "perfectionist": 1.1,
-    "insecure": 1.4,
-    "self-critical": 1.3,
-    "retreat_count": 0.5,       # Escalate nudge if user keeps backing off
-    "procrastination_level": 0.6,
-}
+# ----------------------------------
+# Nudging Score Calculation (Main)
+# ----------------------------------
 
 def calculate_nudging_score(
-    emotions: Dict[str, float],
-    flags: List[str],
-    traits: Dict[str, Any] = {}
-) -> int:
+    user_id: str,
+    user_message: str,
+    ai_response: str,
+    behavior_flags: List[str],
+    user_traits: Dict
+) -> float:
     """
-    Calculates a nudging intensity score between 1–5.
-
-    Factors considered:
-    - Emotional state (weighted by psychological impact)
-    - Detected behavioral flags (contextual triggers)
-    - Long-term user traits (chronic tendencies)
+    Calculates a score indicating how appropriate it is to issue a "nudge" to the user.
+    Higher score = more appropriate for a nudge.
+    
+    Parameters:
+    - user_id: The ID of the user.
+    - user_message: The user's most recent message.
+    - ai_response: The AI's generated response.
+    - behavior_flags: List of flags from behavior analysis (e.g., procrastination, resistance).
+    - user_traits: Current traits/profile of the user.
     """
+    
+    score = 0.0
 
-    # -------- Emotion Weighting --------
-    emotion_score = 0.0
-    for emotion, intensity in emotions.items():
-        weight = EMOTION_WEIGHTS.get(emotion, 0.8)  # Default small influence if unseen
-        emotion_score += intensity * weight
+    # 1. Emotional Relevance
+    if is_emotionally_relevant(user_message, behavior_flags):
+        score += WEIGHTS["emotional_relevance"] * (user_traits.get("emotional_intensity", 0) + 1) # Boost for intensity
 
-    # -------- Behavior Flag Influence --------
-    flag_score = 0.0
-    for flag in flags:
-        # Handle dynamic flags like excuse:xxx
-        if flag.startswith("excuse:"):
-            flag_score += FLAG_WEIGHTS.get("excuse", 0.8)
-        else:
-            flag_score += FLAG_WEIGHTS.get(flag, 0.8)
+    # 2. Procrastination
+    if "procrastination" in behavior_flags:
+        score += WEIGHTS["procrastination"] * (user_traits.get("procrastination_level", 0.5) + 1) # Boost for level
 
-    # -------- Trait Influence --------
-    trait_score = 0.0
-    for trait, trait_value in traits.items():
-        weight = TRAIT_WEIGHTS.get(trait)
-        if weight:
-            # Treat count-based traits like retreat_count or procrastination_level proportionally
-            if isinstance(trait_value, (int, float)):
-                trait_score += trait_value * weight
+    # 3. Resistance
+    if "resistance" in behavior_flags:
+        score += WEIGHTS["resistance"] * (user_traits.get("retreat_count", 0.5) + 1) # Boost for count
 
-    # -------- Total Raw Score --------
-    raw_score = emotion_score + flag_score + trait_score
+    # 4. User Engagement (simple heuristic: more recent messages = more engaged)
+    recent_history = get_recent_history(user_id)
+    if len(recent_history) >= 5: # Engaged if more than 5 messages recently
+        score += WEIGHTS["user_engagement"]
 
-    # -------- Normalization and Capping --------
-    if raw_score <= 2:
-        return 1  # No nudge needed
-    elif raw_score <= 5:
-        return 2  # Soft encouragement
-    elif raw_score <= 8:
-        return 3  # Gentle push
-    elif raw_score <= 11:
-        return 4  # Firm nudge or mild confrontation
-    else:
-        return 5  # Strongest intervention (e.g., challenge, confrontation)
+    # 5. Nudge Fatigue (if too many nudges recently)
+    last_nudge_time = user_traits.get("last_nudge_sent_at")
+    if last_nudge_time:
+        # Assuming last_nudge_sent_at is stored in isoformat or datetime object
+        if isinstance(last_nudge_time, str):
+            try:
+                last_nudge_time = datetime.fromisoformat(last_nudge_time)
+            except ValueError:
+                last_nudge_time = None # Handle invalid format gracefully
+        
+        if last_nudge_time: # Only proceed if conversion was successful
+            cooldown_period = timedelta(minutes=10) # Matches nudge_cooldown_minutes in dark_nudge_engine.py
+            if datetime.now() - last_nudge_time < cooldown_period:
+                score += WEIGHTS["nudge_fatigue"] # Reduce score if within cooldown
 
-def explain_score_breakdown(
-    emotions: Dict[str, float],
-    flags: List[str],
-    traits: Dict[str, Any] = {}
-) -> Dict[str, Any]:
+    # 6. Safe Space Mode (strong negative impact)
+    if user_traits.get("safe_space_mode", False):
+        score += WEIGHTS["safe_space_mode"]
+
+    # 7. Task Relevance
+    if is_task_like_message(user_message):
+        score += WEIGHTS["task_relevance"]
+    
+    # Clamp score between 0 and 1 (or other meaningful range)
+    return max(0.0, min(score, 1.0)) # Assuming score should be between 0 and 1
+
+# ----------------------------------
+# Debugging Helper (Optional)
+# ----------------------------------
+
+def explain_nudging_score(
+    user_id: str,
+    user_message: str,
+    ai_response: str,
+    behavior_flags: List[str],
+    user_traits: Dict
+) -> Dict:
     """
-    Detailed breakdown of what contributed to the final nudge score.
-    Useful for debugging and AI self-monitoring.
+    Returns detailed breakdown of how the nudging score was calculated.
     """
-    emotion_breakdown = {}
-    for emotion, intensity in emotions.items():
-        weight = EMOTION_WEIGHTS.get(emotion, 0.8)
-        emotion_breakdown[emotion] = round(intensity * weight, 2)
+    detail = {}
+    score = 0.0
 
-    flag_breakdown = {}
-    for flag in flags:
-        if flag.startswith("excuse:"):
-            flag_breakdown[flag] = FLAG_WEIGHTS.get("excuse", 0.8)
-        else:
-            flag_breakdown[flag] = FLAG_WEIGHTS.get(flag, 0.8)
+    # 1. Emotional Relevance
+    is_emotional = is_emotionally_relevant(user_message, behavior_flags)
+    emotional_contribution = 0.0
+    if is_emotional:
+        emotional_contribution = WEIGHTS["emotional_relevance"] * (user_traits.get("emotional_intensity", 0) + 1)
+        score += emotional_contribution
+    detail["emotional_relevance"] = {"is_relevant": is_emotional, "contribution": emotional_contribution}
 
-    trait_breakdown = {}
-    for trait, value in traits.items():
-        weight = TRAIT_WEIGHTS.get(trait)
-        if weight and isinstance(value, (int, float)):
-            trait_breakdown[trait] = round(value * weight, 2)
+    # 2. Procrastination
+    is_procrastinating = "procrastination" in behavior_flags
+    procrastination_contribution = 0.0
+    if is_procrastinating:
+        procrastination_contribution = WEIGHTS["procrastination"] * (user_traits.get("procrastination_level", 0.5) + 1)
+        score += procrastination_contribution
+    detail["procrastination"] = {"detected": is_procrastinating, "contribution": procrastination_contribution}
 
-    final_score = calculate_nudging_score(emotions, flags, traits)
+    # 3. Resistance
+    is_resisting = "resistance" in behavior_flags
+    resistance_contribution = 0.0
+    if is_resisting:
+        resistance_contribution = WEIGHTS["resistance"] * (user_traits.get("retreat_count", 0.5) + 1)
+        score += resistance_contribution
+    detail["resistance"] = {"detected": is_resisting, "contribution": resistance_contribution}
 
-    return {
-        "final_score": final_score,
-        "emotions": emotion_breakdown,
-        "flags": flag_breakdown,
-        "traits": trait_breakdown,
-        "raw_sum": round(
-            sum(emotion_breakdown.values()) + sum(flag_breakdown.values()) + sum(trait_breakdown.values()),
-            2
-        )
-    }
+    # 4. User Engagement
+    recent_history_len = len(get_recent_history(user_id))
+    engagement_contribution = 0.0
+    if recent_history_len >= 5:
+        engagement_contribution = WEIGHTS["user_engagement"]
+        score += engagement_contribution
+    detail["user_engagement"] = {"recent_messages": recent_history_len, "contribution": engagement_contribution}
+
+    # 5. Nudge Fatigue
+    fatigue_contribution = 0.0
+    last_nudge_time = user_traits.get("last_nudge_sent_at")
+    within_cooldown = False
+    if last_nudge_time:
+        if isinstance(last_nudge_time, str):
+            try:
+                last_nudge_time = datetime.fromisoformat(last_nudge_time)
+            except ValueError:
+                last_nudge_time = None
+        
+        if last_nudge_time:
+            cooldown_period = timedelta(minutes=10)
+            if datetime.now() - last_nudge_time < cooldown_period:
+                fatigue_contribution = WEIGHTS["nudge_fatigue"]
+                score += fatigue_contribution
+                within_cooldown = True
+    detail["nudge_fatigue"] = {"last_nudge_time": str(last_nudge_time) if last_nudge_time else None, "within_cooldown": within_cooldown, "contribution": fatigue_contribution}
+
+    # 6. Safe Space Mode
+    in_safe_space = user_traits.get("safe_space_mode", False)
+    safe_space_contribution = 0.0
+    if in_safe_space:
+        safe_space_contribution = WEIGHTS["safe_space_mode"]
+        score += safe_space_contribution
+    detail["safe_space_mode"] = {"enabled": in_safe_space, "contribution": safe_space_contribution}
+
+    # 7. Task Relevance
+    is_task_relevant = is_task_like_message(user_message)
+    task_relevance_contribution = 0.0
+    if is_task_relevant:
+        task_relevance_contribution = WEIGHTS["task_relevance"]
+        score += task_relevance_contribution
+    detail["task_relevance"] = {"is_task_like": is_task_relevant, "contribution": task_relevance_contribution}
+    
+    final_score = max(0.0, min(score, 1.0))
+    detail["final_score"] = final_score
+    return detail

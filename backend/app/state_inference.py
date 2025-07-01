@@ -4,6 +4,8 @@ from .nlp_analysis import detect_emotion
 from .memory import update_trait, get_traits, get_recent_history
 from .task_topic_inference import infer_task_topic
 import json
+from transformers import pipeline
+from app.user_profile_inference import update_user_profile
 
 # ------------------------------------
 # Emotion & Intent Keyword Maps
@@ -16,7 +18,7 @@ INTENT_KEYWORDS = {
 }
 
 SUBSTANCE_KEYWORDS = {
-    "weed": ["high", "stoned", "smoke weed", "blunt", "joint"],
+    "weed": ["high", "stoned", "smoke weed", "blunt", "joint", "smoke up"],
     "alcohol": ["drunk", "booze", "wine", "beer", "vodka"],
     "nicotine": ["cigarette", "vape", "nicotine", "smoke"]
 }
@@ -44,6 +46,22 @@ EMOTION_INTENSITY_MAP = {
 }
 
 # ------------------------------------
+# Utility: JSON-safe serializer
+# ------------------------------------
+
+def serialize_for_json(obj):
+    if isinstance(obj, (list, tuple)):
+        return [serialize_for_json(i) for i in obj]
+    elif isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (str, int, float, type(None))):
+        return obj
+    elif hasattr(obj, 'isoformat'):
+        return obj.isoformat()
+    else:
+        return str(obj)
+
+# ------------------------------------
 # Keyword-Based State Detection
 # ------------------------------------
 
@@ -58,18 +76,25 @@ def infer_from_keywords(text: str, keyword_map: Dict[str, list], default: str = 
 # Emotion Detection + Trait Update
 # ------------------------------------
 
-def infer_emotional_state(message: str, user_id: str = None) -> Dict[str, float]:
-    emotion_label = detect_emotion(message)
-    intensity = EMOTION_INTENSITY_MAP.get(emotion_label, 0.3)
+emotion_classifier = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
 
-    # ✅ Optional: Track running emotional trends for the user
-    if user_id and emotion_label != "unknown":
-        trait_name = f"emotion_{emotion_label}_count"
-        existing = get_traits(user_id).get(trait_name, 0)
-        update_trait(user_id, trait_name, existing + 1)
-        update_trait(user_id, emotion_label, intensity)
+def infer_emotional_state(text: str, user_id: str = None) -> Dict[str, float]:
+    try:
+        output = emotion_classifier(text)
+        scores = {item['label'].lower(): item['score'] for item in output[0]}
+    except Exception as e:
+        print(f"[Emotion Detection Error]: {e}")
+        return {"unknown": 1.0}
 
-    return {emotion_label: intensity}
+    # Update user traits if user_id is provided
+    if user_id:
+        for emotion, score in scores.items():
+            trait_name = f"emotion_{emotion}_count"
+            existing = get_traits(user_id).get(trait_name, 0)
+            update_trait(user_id, trait_name, existing + 1)
+            update_trait(user_id, emotion, EMOTION_INTENSITY_MAP.get(emotion, 0.3))
+
+    return scores
 
 # ------------------------------------
 # Human-Like Emotion Summary
@@ -112,19 +137,25 @@ def infer_user_state(message: str) -> Dict[str, str]:
 # ------------------------------------
 
 def inject_context(message: str, user_id: str):
-    from .behaviour_analyzer import analyze_behavior  # Lazy import
+    from .behaviour_analyzer import analyze_behavior
+
     flags = analyze_behavior(user_id, message)
+    update_user_profile(user_id, message)
     emotions = infer_emotional_state(message, user_id)
     emotion_summary = summary_emotions(emotions)
-    recent_history = get_recent_history(user_id)
     traits = get_traits(user_id)
+    recent_history = get_recent_history(user_id)[-5:]  # Last 5 messages
 
-    # ✅ Generate a cleaner, LLM-readable context string:
-    context_str = (
-        f"User Emotional State: {emotion_summary}\n"
-        f"User Traits: {json.dumps(traits)}\n"
-        f"Recent History Snippets: {json.dumps(recent_history[-5:])}\n"
-        f"Behavioral Flags: {flags}"
+    user_name = traits.get("user_name", "user")
+    interests = [k.replace("interest_", "") for k, v in traits.items() if k.startswith("interest_") and v]
+
+    personalization = (
+        f"User Name: {user_name}\n"
+        f"Interests: {', '.join(interests) if interests else 'Not enough data yet'}\n"
+        f"Emotional State Summary: {emotion_summary}\n"
+        f"Behavioral Flags: {flags}\n"
+        f"Recent History: {json.dumps(serialize_for_json(recent_history))}\n"
+        f"Full Traits Snapshot: {json.dumps(serialize_for_json(traits))}"
     )
 
-    return context_str, flags, emotions
+    return personalization, flags, emotions

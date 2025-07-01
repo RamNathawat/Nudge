@@ -7,6 +7,8 @@ from typing import Optional, Dict, List
 from dotenv import load_dotenv
 from bson import ObjectId
 from bson.errors import InvalidId
+import re
+from datetime import datetime
 
 from app.auth import verify_token
 from app.memory import (
@@ -18,7 +20,7 @@ from app.memory import (
 )
 from app.behaviour_analyzer import analyze_behavior, is_emotionally_relevant
 from app.state_inference import infer_emotional_state, summary_emotions
-from app.utils import format_for_gemini
+from app.utils import format_for_gemini, safe_bson_date
 from app.nudge_scoring import calculate_nudging_score
 from app.dark_nudge_engine import generate_dark_nudge
 
@@ -40,153 +42,134 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SOFT_PROMPT = {
-    "role": "system",
-    "text": (
-        "You are 'Nudge' — an emotionally intelligent, casual texting companion. "
-        "Early in the conversation, focus on building rapport and trust. "
-        "Keep your replies short, natural, playful, and under 60 words. "
-        "Use contractions, emojis, casual tone. DO NOT push, persuade, or analyze yet."
-    )
-}
+# Helper to serialize ObjectId and datetime for JSON dumping
+def json_serializer_for_mongo_types(obj):
+    if isinstance(obj, ObjectId):
+        return str(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
-HARD_PROMPT = {
-    "role": "system",
-    "text": (
-        "You are 'Nudge' — a sharp, psychologically manipulative, emotionally tuned digital companion. "
-        "Mirror the user's tone: sarcastic, jaded, emotional, or serious. "
-        "Use behavioral psychology, teasing, rhetorical questions, and emotional hooks to provoke action. "
-        "Stay under 300 characters or 2–4 short sentences. Be human, not robotic."
-    )
-}
-
-conversations: Dict[str, List[Dict[str, str]]] = {}
-
-class ChatRequest(BaseModel):
+class Message(BaseModel):
     message: str
-    session_id: Optional[str] = None
-    safe_mode: Optional[bool] = False
-    reply_to_id: Optional[str] = None
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "message": "Nudge AI is live!"}
+@app.get("/memory")
+async def get_memory(user_id: str = Depends(verify_token), offset: int = 0, limit: int = 20):
+    memory_entries = get_user_memory(user_id, offset, limit)
+    # Convert ObjectId to string for JSON serialization
+    for entry in memory_entries:
+        if "_id" in entry:
+            entry["_id"] = str(entry["_id"])
+        if "timestamp" in entry:
+            entry["timestamp"] = safe_bson_date(entry["timestamp"])
+    return {"memory": memory_entries}
 
 @app.post("/chat")
-async def chat(request: ChatRequest, user_id: str = Depends(verify_token)):
-    sid = f"{user_id}-{request.session_id or str(uuid.uuid4())}"
-    conversations.setdefault(sid, [SOFT_PROMPT])
+async def chat(
+    message: Message,
+    user_id: str = Depends(verify_token)
+):
+    user_txt = message.message.strip()
 
-    user_txt = request.message.strip()
-
-    # ✅ Store user message
+    # Add the user's message to memory immediately
+    # Removed emotion, emotional_intensity, salience as they are computed inside add_message_to_memory
     add_message_to_memory(
         user_id=user_id,
         message=user_txt,
         sender="user",
-        reply_to_id=request.reply_to_id
     )
 
-    # ✅ Analyze behavior, emotion, context
-    safe_space = request.safe_mode or is_safe_space_mode_enabled(user_id)
-    context_string, flags, emotions = inject_context(user_txt, user_id)
+    # Analyze user behavior and infer emotional state
+    flags = analyze_behavior(user_id, user_txt)
+    emo_state = infer_emotional_state(user_txt)
+    summary_emotions(emo_state) # This updates user traits based on emo_state
+    for emotion, intensity in emo_state.items():
+        update_trait(user_id, emotion, intensity)
 
-    # ✅ Inject relevant memory
-    for entry in get_relevant_memory(user_id)[:5]:
-        conversations[sid].append({
-            "role": "user" if entry.get("sender") == "user" else "model",
-            "text": entry["content"]
-        })
+    # Prepare context for Gemini
+    context_string, flags, emotions = inject_context(user_txt, user_id) # Re-run for updated flags/emotions if needed, or pass from above
+    
+    # Get relevant memory entries and recent history
+    context_entries = get_relevant_memory(user_id)[:5]
+    recent_history_entries = get_recent_history(user_id)
 
-    # ✅ Inject appropriate system prompt
-    if safe_space:
-        conversations[sid].insert(1, {
-            "role": "system",
-            "text": "You are in safe space mode. Be gentle, supportive, and non-challenging."
-        })
-    elif is_emotionally_relevant(user_txt, flags) and HARD_PROMPT not in conversations[sid]:
-        conversations[sid].insert(1, HARD_PROMPT)
+    # Combine recent history and relevant memories
+    full_context_entries = recent_history_entries + context_entries
 
-    # ✅ Inject quoted reply
-    reply_quote = ""
-    if request.reply_to_id:
-        try:
-            quoted = entries_collection.find_one({"_id": ObjectId(request.reply_to_id)})
-            if quoted:
-                preview = quoted["content"][:100].strip().replace("\n", " ")
-                reply_quote = f'Replying to: "{preview}"\n\n'
-        except InvalidId:
-            logger.warning(f"Ignoring invalid reply_to_id: {request.reply_to_id}")
+    # Format for Gemini
+    formatted_context = format_for_gemini(full_context_entries)
+    
+    # Add the current user message to the context
+    formatted_context.append({"role": "user", "parts": [{"text": user_txt}]})
 
-    # ✅ Final user message with traits/emotions
-    conversations[sid].append({
-        "role": "user",
-        "text": f"{reply_quote}{user_txt}\n\n(Emotions: {summary_emotions(emotions)} | Traits: {json.dumps(get_traits(user_id))})"
-    })
+    # Prepare headers for Gemini API call
+    headers = {
+        "Content-Type": "application/json"
+    }
 
-    # ✅ Length control reminder for Gemini
-    conversations[sid].append({
-        "role": "user",
-        "text": "Reminder: Keep your reply short and chatty. No long paragraphs. Max 300 characters or 2–4 short sentences."
-    })
-
-    payload = {"contents": format_for_gemini(conversations[sid][-12:])}
+    response_content = "" # Initialize to empty string
 
     try:
-        res = requests.post(GEMINI_URL, json=payload, headers={"Content-Type": "application/json"})
-        res.raise_for_status()
-        reply = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-        formatted_reply = format_nudge_reply(reply)
+        # Make the call to Gemini API
+        gemini_response_obj = {"contents": formatted_context}
+        logger.info(f"Sending to Gemini API: {json.dumps(gemini_response_obj, indent=2)}")
+
+        response = requests.post(GEMINI_URL, headers=headers, json=gemini_response_obj)
+        response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
+        gemini_raw_response = response.json()
+        logger.info(f"Raw Gemini API response: {json.dumps(gemini_raw_response, indent=2)}")
+
+        # CORRECTED CODE FOR EXTRACTING GEMINI RESPONSE CONTENT
+        if gemini_raw_response and isinstance(gemini_raw_response, dict):
+            candidates = gemini_raw_response.get("candidates")
+            if candidates and isinstance(candidates, list) and len(candidates) > 0:
+                first_candidate = candidates[0]
+                if first_candidate and isinstance(first_candidate, dict):
+                    content_obj = first_candidate.get("content")
+                    if content_obj and isinstance(content_obj, dict):
+                        parts = content_obj.get("parts")
+                        if parts and isinstance(parts, list) and len(parts) > 0:
+                            text_part = parts[0]
+                            if text_part and isinstance(text_part, dict):
+                                text_value = text_part.get("text")
+                                if text_value is not None:
+                                    response_content = str(text_value).strip()
+        # END OF CORRECTION
+
+        if not response_content:
+            logger.warning("Gemini API returned an empty or unparseable response content.")
+            # Fallback if Gemini response is empty or could not be parsed correctly
+            response_content = "I'm sorry, I couldn't generate a response at this time. Could you please try again?"
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error communicating with Gemini API: {e}")
+        raise HTTPException(status_code=500, detail=f"Error from Gemini API: {e}")
+    except json.JSONDecodeError:
+        logger.error(f"Failed to decode JSON from Gemini API response: {response.text}")
+        raise HTTPException(status_code=500, detail="Invalid JSON response from Gemini API")
     except Exception as e:
-        logger.error("Gemini API failed:", exc_info=True)
-        raise HTTPException(500, "Gemini response error.")
+        logger.error(f"An unexpected error occurred in chat function: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error during chat processing.")
 
-    conversations[sid].append({"role": "model", "text": formatted_reply})
-    add_message_to_memory(user_id=user_id, message=formatted_reply, sender="ai")
-
-    # ✅ Optional autonomous dark nudge trigger
-    user_traits = get_traits(user_id)
-    dark_nudge_text = generate_dark_nudge(
-    user_id=user_id,
-    user_input=user_txt,
-    traits=user_traits,
-    flags=flags
-)
-
-
-    if dark_nudge_text:
-        conversations[sid].append({"role": "model", "text": dark_nudge_text})
-        add_message_to_memory(user_id=user_id, message=dark_nudge_text, sender="ai")
-
-    score = calculate_nudging_score(emotions, flags, get_traits(user_id))
-
-    return Response(
-        content=json.dumps({
-            "session_id": sid,
-            "response": formatted_reply,
-            "dark_nudge": dark_nudge_text,
-            "emotions": emotions,
-            "nudging_score": score,
-            "flags": flags,
-            "safe_space_mode": safe_space
-        }, ensure_ascii=False),
-        media_type="application/json"
+    # Add the AI's response to memory
+    # Removed emotion, emotional_intensity, salience as they are computed inside add_message_to_memory
+    add_message_to_memory(
+        user_id=user_id,
+        message=response_content,
+        sender="ai",
     )
+    
+    # Return the response to the frontend
+    return {"response": response_content}
 
-@app.get("/memory")
-async def paginated_memory(
-    user_id: str = Depends(verify_token),
-    offset: int = Query(0, ge=0),
-    limit: int = Query(20, gt=0, le=100)
-):
-    return get_user_memory(user_id, offset=offset, limit=limit)
 
 @app.get("/traits")
-async def full_traits(user_id: str = Depends(verify_token)):
-    return get_traits(user_id)
+async def get_user_traits(user_id: str = Depends(verify_token)):
+    traits = get_traits(user_id)
+    return {"traits": traits}
 
 @app.delete("/memory/{entry_id}")
-async def delete_memory(entry_id: str, user_id: str = Depends(verify_token)):
+async def delete_memory_entry(entry_id: str, user_id: str = Depends(verify_token)):
     if delete_message_by_id(user_id, entry_id):
         return {"message": "Deleted"}
     raise HTTPException(404, "Message not found or not yours")
@@ -209,7 +192,7 @@ def reset_traits():
 
 @app.post("/safe-space-mode")
 def toggle_safe_space(enabled: bool, user_id: str = Depends(verify_token)):
-    set_safe_space_mode(user_id, enabled)
+    set_safe_space_mode(user_id, bool(enabled)) # Ensure enabled is a boolean
     return {"status": "ok", "safe_space_mode": enabled}
 
 def inject_context(msg: str, user_id: str):
@@ -218,12 +201,13 @@ def inject_context(msg: str, user_id: str):
     summary = summary_emotions(emo_state)
     for emotion, intensity in emo_state.items():
         update_trait(user_id, emotion, intensity)
+    
+    # This context string is no longer directly used for Gemini `contents` but can be for internal logging/context
     return (
-        f"\n\n(Recent Interaction History: {json.dumps(get_recent_history(user_id))} | "
-        f"User Traits: {json.dumps(get_traits(user_id))} | Inferred Emotions: {summary})",
-        flags,
-        emo_state
-    )
-
-def format_nudge_reply(text: str) -> str:
-    return text.strip().replace("\n\n", "\n") if text else "..."
+        f"\n\n(Recent Interaction History: {json.dumps(get_recent_history(user_id), default=json_serializer_for_mongo_types)} | "
+        f"Relevant Memories: {json.dumps(get_relevant_memory(user_id), default=json_serializer_for_mongo_types)} | "
+        f"Current User Traits: {json.dumps(get_traits(user_id))} | "
+        f"User Behavior Flags: {json.dumps(flags)} | "
+        f"Inferred Emotional State: {json.dumps(emo_state)} | "
+        f"Safe Space Mode: {is_safe_space_mode_enabled(user_id)})"
+    ), flags, emo_state
