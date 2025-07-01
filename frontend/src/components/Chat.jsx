@@ -308,15 +308,16 @@ function Chat() {
     }
   };
 
-  const styles = {
-    container: { display: "flex", height: "100vh", width: "100vw", background: "#fff", fontFamily: "'DM Sans', sans-serif", flexDirection: "column" },
-    main: { flex: 1, display: "flex", flexDirection: "column", width: "100%" },
+const styles = {
+    fontFamily: "'Satoshi', sans-serif", 
+    container: { display: "flex", height: "100vh", width: "100vw", background: "#fff", fontFamily: "'Satoshi', sans-serif", flexDirection: "column" },
+    main: { flex: 1, display: "flex", flexDirection: "column", width: "100%", overflow: "hidden" },
     header: { padding: "10px 20px", borderBottom: "1px solid #eee", display: "flex", justifyContent: "flex-end" },
     toggle: { position: "relative", display: "inline-block", width: "50px", height: "24px" },
     toggleInput: { opacity: 0, width: 0, height: 0 },
     slider: { position: "absolute", cursor: "pointer", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: safeMode ? "#FFD54F" : "#ccc", transition: ".4s", borderRadius: "24px" },
     sliderBefore: { position: "absolute", content: "\"\"", height: "18px", width: "18px", left: safeMode ? "28px" : "4px", bottom: "3px", backgroundColor: "white", transition: ".4s", borderRadius: "50%" },
-    chat: { flex: 1, overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column", gap: "10px" },
+    chat: { flex: 1, overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column", gap: "10px", backgroundColor: "#fff", fontFamily: "'Satoshi', sans-serif" },
     messageRow: (sender) => ({
       display: "flex",
       gap: "8px",
@@ -324,6 +325,7 @@ function Chat() {
       justifyContent: sender === "user" ? "flex-end" : "flex-start",
       marginLeft: sender === "user" ? "auto" : "unset",
       marginRight: sender === "ai" ? "auto" : "unset",
+      fontFamily: "'Satoshi', sans-serif",
     }),
     avatar: { height: "32px", width: "32px", borderRadius: "50%", backgroundColor: "#FFD54F", flexShrink: 0 },
     bubble: (sender) => ({
@@ -332,12 +334,13 @@ function Chat() {
       padding: "8px 12px",
       borderRadius: "8px",
       maxWidth: "75%",
-      wordBreak: "break-word", // Ensures long words wrap
-      textTransform: "lowercase", // Apply lowercase
-      boxShadow: "0 2px 6px rgba(0,0,0,0.08)" // Added shadow
+      wordBreak: "break-word",
+      textTransform: "lowercase",
+      boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
+      fontFamily: "'Satoshi', sans-serif",
     }),
-    inputContainer: { display: "flex", alignItems: "center", padding: "10px", margin: "10px", border: "1px solid #ccc", borderRadius: "12px", background: "#fff" },
-    textArea: { flex: 1, borderRadius: "10px", border: "none", padding: "10px 15px", resize: "none", background: "#fff", color: "black", outline: "none" },
+    inputContainer: { display: "flex", alignItems: "center", padding: "10px", margin: "10px", border: "1px solid #ccc", borderRadius: "12px", background: "#fff", fontFamily: "'Satoshi', sans-serif" },
+    textArea: { flex: 1, borderRadius: "10px", border: "none", padding: "10px 15px", resize: "none", background: "#fff", color: "black", outline: "none", fontFamily: "'Satoshi', sans-serif" },
     sendButton: {
       marginLeft: "10px",
       borderRadius: "50%",
@@ -350,13 +353,14 @@ function Chat() {
       alignItems: "center",
       justifyContent: "center",
       flexShrink: 0,
-      padding: 0, // Remove padding to center the image better
+      padding: 0,
+      fontFamily: "'Satoshi', sans-serif",
     },
     sendButtonImage: {
-      width: "24px", // Adjust size of the image as needed
-      height: "24px", // Adjust size of the image as needed
+      width: "24px",
+      height: "24px",
     },
-    timestamp: { textAlign: "center", fontSize: "0.8em", color: "#888", margin: "10px 0" },
+    timestamp: { textAlign: "center", fontSize: "0.8em", color: "#888", margin: "10px 0", fontFamily: "'Satoshi', sans-serif" },
     contextMenu: {
       position: "absolute",
       background: "#fff",
@@ -366,13 +370,12 @@ function Chat() {
       zIndex: 1000,
       minWidth: "120px",
       overflow: "hidden",
+      fontFamily: "'Satoshi', sans-serif",
     },
     contextItem: {
       padding: "10px 15px",
       cursor: "pointer",
-      "&:hover": {
-        backgroundColor: "#f0f0f0",
-      },
+      fontFamily: "'Satoshi', sans-serif",
     },
     errorBox: {
       backgroundColor: "#ffebee",
@@ -381,6 +384,7 @@ function Chat() {
       margin: "10px",
       borderRadius: "8px",
       textAlign: "center",
+      fontFamily: "'Satoshi', sans-serif",
     },
     replyPreview: {
       fontSize: "0.75em",
@@ -388,6 +392,7 @@ function Chat() {
       marginBottom: "5px",
       padding: "0 5px",
       fontStyle: "italic",
+      fontFamily: "'Satoshi', sans-serif",
     },
     replyIndicator: {
       backgroundColor: "#e0e0e0",
@@ -398,10 +403,11 @@ function Chat() {
       alignItems: "center",
       fontSize: "0.9em",
       color: "#424242",
-      width: "calc(100% - 20px)", // Adjust width to match input container
-      maxWidth: "calc(100% - 20px)", // Adjust max-width
+      width: "calc(100% - 20px)",
+      maxWidth: "calc(100% - 20px)",
       boxSizing: "border-box",
-      margin: "0 10px 5px 10px", // Margin to align with input container
+      margin: "0 10px 5px 10px",
+      fontFamily: "'Satoshi', sans-serif",
     },
     replyIndicatorText: {
       flexGrow: 1,
@@ -409,6 +415,7 @@ function Chat() {
       overflow: "hidden",
       textOverflow: "ellipsis",
       marginRight: "10px",
+      fontFamily: "'Satoshi', sans-serif",
     },
     replyIndicatorClose: {
       background: "none",
@@ -417,14 +424,18 @@ function Chat() {
       cursor: "pointer",
       color: "#616161",
       padding: "0",
+      fontFamily: "'Satoshi', sans-serif",
     },
     loadingMoreIndicator: {
       textAlign: 'center',
       padding: '0.5rem',
       color: '#757575',
       fontSize: '0.9rem',
+      fontFamily: "'Satoshi', sans-serif",
     }
   };
+
+// ✅ All frontend UI components now use Satoshi font globally
 
   return (
     <div style={styles.container}>

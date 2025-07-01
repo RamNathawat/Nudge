@@ -102,6 +102,20 @@ async def chat(
     # Add the current user message to the context
     formatted_context.append({"role": "user", "parts": [{"text": user_txt}]})
 
+    # Prompt Control: Force Gemini to keep responses short, punchy, and within 2-3 sentences while maintaining Nudge's personality
+    formatted_context.insert(0, {
+    "role": "user",
+    "parts": [{
+        "text": (
+            "Important: Keep your replies short, punchy, and direct—no more than 2-3 sentences. "
+            "Be concise but still sound like Nudge: emotionally aware, witty, and a little sarcastic if needed. "
+            "Cut unnecessary filler, but keep personality intact."
+            "be empathetic and supportive, but also witty and a bit sarcastic if you feel the user needs it or is sad or feeling negative emotions . "
+        )
+    }]
+})
+
+
     # Prepare headers for Gemini API call
     headers = {
         "Content-Type": "application/json"
