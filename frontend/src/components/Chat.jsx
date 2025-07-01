@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import upArrow from "/src/assets/up-arrow.png"; // Assuming this path is correct relative to the component
 
 function formatTimestamp(ts) {
   const date = new Date(ts);
@@ -25,7 +26,8 @@ const MessageItem = React.memo(({ msg, prevMessageTimestamp, formatReplyPreview,
           {formatTimestamp(msg.timestamp)}
         </div>
       )}
-      <div style={styles.messageWrapper(msg.sender)}>
+      <div style={styles.messageRow(msg.sender)}>
+        {msg.sender !== "user" && <div style={styles.avatar}></div>}
         <div>
           {msg.replyTo && (
             <div style={{ ...styles.replyPreview, textAlign: msg.sender === "user" ? "right" : "left" }}>
@@ -46,11 +48,12 @@ const MessageItem = React.memo(({ msg, prevMessageTimestamp, formatReplyPreview,
               </div>
             </div>
           ) : (
-            <div style={styles.messageBubble(msg.sender)} onContextMenu={(e) => handleContextMenu(e, index)}>
+            <div style={styles.bubble(msg.sender)} onContextMenu={(e) => handleContextMenu(e, index)}>
               {msg.text}
             </div>
           )}
         </div>
+        {msg.sender === "user" && <div style={styles.avatar}></div>}
       </div>
     </>
   );
@@ -281,6 +284,20 @@ function Chat() {
     }
   }
 
+  const toggleSafeMode = async () => {
+    const newMode = !safeMode;
+    try {
+      const token = localStorage.getItem("access_token");
+      await fetch(`${baseUrl}/safe-space-mode?enabled=${newMode}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setSafeMode(newMode);
+    } catch (err) {
+      console.error("Safe mode toggle failed", err);
+    }
+  };
+
   // New handler for Enter key press
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -292,69 +309,199 @@ function Chat() {
   };
 
   const styles = {
-    appContainer: { height: "100vh", width: "100vw", display: "flex", flexDirection: "column", fontFamily: "'Inter', sans-serif", background: "#FFFDF5", color: "#2E2E2E", overflow: "hidden" },
-    messagesContainer: { flexGrow: 1, overflowY: "auto", padding: "1.5rem 8% 7.5rem", backgroundColor: "#ffffff", display: "flex", flexDirection: "column", gap: "0.75rem" },
-    messageWrapper: (s) => ({ display: "flex", justifyContent: s === "user" ? "flex-end" : "flex-start" }),
-    messageBubble: (s) => ({ backgroundColor: s === "user" ? "#FFF59D" : "#FFE082", color: "#212121", padding: "1rem 1.5rem", borderRadius: s === "user" ? "20px 20px 5px 20px" : "20px 20px 20px 5px", maxWidth: "65%", whiteSpace: "pre-wrap", cursor: "context-menu", boxShadow: "0 2px 6px rgba(0,0,0,0.08)" }),
-    timestamp: { textAlign: "center", fontSize: "0.8rem", color: "#6D4C41", margin: "1.5rem 0 0.8rem" },
-    inputForm: { position: "fixed", bottom: 0, width: "100%", display: "flex", flexDirection: "column", gap: "0.5rem", padding: "1rem 0 1.5rem 0", background: "#FFFDE7", borderTop: "1px solid #F5F5F5", alignItems: "center" },
-    inputContainer: { display: "flex", gap: "1rem", width: "90%", maxWidth: "800px" },
-    textArea: { flexGrow: 1, padding: "0.8rem 1.2rem", borderRadius: "25px", border: "1px solid #BDBDBD", resize: "none", maxHeight: "100px", color: "#212121", backgroundColor: "#FFFFFF" },
-    sendButton: { border: "none", background: "linear-gradient(45deg,#FFD54F,#FFC107)", color: "#212121", padding: "0.8rem 1.8rem", borderRadius: "25px", cursor: "pointer" },
-    contextMenu: { position: "absolute", background: "#fff", border: "1px solid #E0E0E0", borderRadius: "8px", boxShadow: "0 4px 12px rgba(0,0,0,0.1)", zIndex: 9999, color: "#212121" },
-    contextItem: { padding: "0.6rem 1.5rem", cursor: "pointer", color: "#212121" },
-    errorBox: { backgroundColor: "#FFEBEE", color: "#C62828", padding: "0.8rem 1.5rem", margin: "0.5rem 8% 0", borderRadius: "8px", textAlign: "center" },
-    replyPreview: { fontSize: "0.75rem", color: "#757575", marginBottom: "0.25rem", textAlign: "left", paddingLeft: "1.5rem", paddingRight: "1.5rem" },
-    replyIndicator: { backgroundColor: "#E0E0E0", borderRadius: "10px", padding: "0.5rem 1rem", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.9rem", color: "#424242", width: "90%", maxWidth: "800px", boxSizing: "border-box", margin: "0 auto" },
-    replyIndicatorText: { flexGrow: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginRight: "0.5rem" },
-    replyIndicatorClose: { background: "none", border: "none", fontSize: "1.2rem", cursor: "pointer", color: "#616161", padding: "0 0.3rem" },
-    loadingMoreIndicator: { textAlign: 'center', padding: '0.5rem', color: '#757575', fontSize: '0.9rem' }
+    container: { display: "flex", height: "100vh", width: "100vw", background: "#fff", fontFamily: "'DM Sans', sans-serif", flexDirection: "column" },
+    main: { flex: 1, display: "flex", flexDirection: "column", width: "100%" },
+    header: { padding: "10px 20px", borderBottom: "1px solid #eee", display: "flex", justifyContent: "flex-end" },
+    toggle: { position: "relative", display: "inline-block", width: "50px", height: "24px" },
+    toggleInput: { opacity: 0, width: 0, height: 0 },
+    slider: { position: "absolute", cursor: "pointer", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: safeMode ? "#FFD54F" : "#ccc", transition: ".4s", borderRadius: "24px" },
+    sliderBefore: { position: "absolute", content: "\"\"", height: "18px", width: "18px", left: safeMode ? "28px" : "4px", bottom: "3px", backgroundColor: "white", transition: ".4s", borderRadius: "50%" },
+    chat: { flex: 1, overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column", gap: "10px" },
+    messageRow: (sender) => ({
+      display: "flex",
+      gap: "8px",
+      alignItems: "flex-end",
+      justifyContent: sender === "user" ? "flex-end" : "flex-start",
+      marginLeft: sender === "user" ? "auto" : "unset",
+      marginRight: sender === "ai" ? "auto" : "unset",
+    }),
+    avatar: { height: "32px", width: "32px", borderRadius: "50%", backgroundColor: "#FFD54F", flexShrink: 0 },
+    bubble: (sender) => ({
+      backgroundColor: sender === "user" ? "#FFD54F" : "#F6F4F3",
+      color: "black",
+      padding: "8px 12px",
+      borderRadius: "8px",
+      maxWidth: "75%",
+      wordBreak: "break-word", // Ensures long words wrap
+      textTransform: "lowercase", // Apply lowercase
+      boxShadow: "0 2px 6px rgba(0,0,0,0.08)" // Added shadow
+    }),
+    inputContainer: { display: "flex", alignItems: "center", padding: "10px", margin: "10px", border: "1px solid #ccc", borderRadius: "12px", background: "#fff" },
+    textArea: { flex: 1, borderRadius: "10px", border: "none", padding: "10px 15px", resize: "none", background: "#fff", color: "black", outline: "none" },
+    sendButton: {
+      marginLeft: "10px",
+      borderRadius: "50%",
+      width: "40px",
+      height: "40px",
+      background: "#FFD54F",
+      border: "none",
+      cursor: "pointer",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      flexShrink: 0,
+      padding: 0, // Remove padding to center the image better
+    },
+    sendButtonImage: {
+      width: "24px", // Adjust size of the image as needed
+      height: "24px", // Adjust size of the image as needed
+    },
+    timestamp: { textAlign: "center", fontSize: "0.8em", color: "#888", margin: "10px 0" },
+    contextMenu: {
+      position: "absolute",
+      background: "#fff",
+      border: "1px solid #eee",
+      borderRadius: "8px",
+      boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
+      zIndex: 1000,
+      minWidth: "120px",
+      overflow: "hidden",
+    },
+    contextItem: {
+      padding: "10px 15px",
+      cursor: "pointer",
+      "&:hover": {
+        backgroundColor: "#f0f0f0",
+      },
+    },
+    errorBox: {
+      backgroundColor: "#ffebee",
+      color: "#d32f2f",
+      padding: "10px",
+      margin: "10px",
+      borderRadius: "8px",
+      textAlign: "center",
+    },
+    replyPreview: {
+      fontSize: "0.75em",
+      color: "#555",
+      marginBottom: "5px",
+      padding: "0 5px",
+      fontStyle: "italic",
+    },
+    replyIndicator: {
+      backgroundColor: "#e0e0e0",
+      borderRadius: "8px",
+      padding: "8px 12px",
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      fontSize: "0.9em",
+      color: "#424242",
+      width: "calc(100% - 20px)", // Adjust width to match input container
+      maxWidth: "calc(100% - 20px)", // Adjust max-width
+      boxSizing: "border-box",
+      margin: "0 10px 5px 10px", // Margin to align with input container
+    },
+    replyIndicatorText: {
+      flexGrow: 1,
+      whiteSpace: "nowrap",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      marginRight: "10px",
+    },
+    replyIndicatorClose: {
+      background: "none",
+      border: "none",
+      fontSize: "1.2em",
+      cursor: "pointer",
+      color: "#616161",
+      padding: "0",
+    },
+    loadingMoreIndicator: {
+      textAlign: 'center',
+      padding: '0.5rem',
+      color: '#757575',
+      fontSize: '0.9rem',
+    }
   };
 
   return (
-    <div style={styles.appContainer}>
-      <div ref={messagesContainerRef} style={styles.messagesContainer}>
-        {isFetchingMore && <div style={styles.loadingMoreIndicator}>Loading older messages...</div>}
-        {!isFetchingMore && messages.length === 0 && !hasMore && <p style={{ textAlign: 'center', padding: '1rem', color: '#555' }}>Hey! 😊 I'm Nudge. What's on your mind?</p>}
-        {messages.map((msg, i) => (
-          <MessageItem key={msg.id || `${msg.timestamp}-${i}`} msg={msg} index={i} prevMessageTimestamp={i > 0 ? messages[i - 1].timestamp : null} formatReplyPreview={formatReplyPreview} handleContextMenu={handleContextMenuCallback} editingIndex={editingIndex} editValue={editValue} setEditValue={setEditValue} saveEdit={saveEdit} styles={styles} />
-        ))}
-        <div ref={chatEndRef} />
-      </div>
-
-      {contextMenu.visible && (
-        <div style={{ ...styles.contextMenu, top: contextMenu.y, left: contextMenu.x }}>
-          <div onClick={handleEdit} style={styles.contextItem}>✏️ Edit</div>
-          <div onClick={handleDelete} style={styles.contextItem}>🗑️ Delete</div>
-          <div onClick={handleCopy} style={styles.contextItem}>📋 Copy</div>
-          <div onClick={handleReply} style={styles.contextItem}>↩️ Reply</div>
+    <div style={styles.container}>
+      <div style={styles.main}>
+        <div style={styles.header}>
+          <label style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "0.9em", color: "#555" }}>
+            Safe Mode
+            <div style={styles.toggle} onClick={toggleSafeMode}>
+              <input type="checkbox" checked={safeMode} readOnly style={styles.toggleInput} />
+              <div style={styles.slider}>
+                <div style={styles.sliderBefore}></div>
+              </div>
+            </div>
+          </label>
         </div>
-      )}
 
-      {error && <div style={styles.errorBox}>{error}</div>}
+        <div ref={messagesContainerRef} style={styles.chat}>
+          {isFetchingMore && <div style={styles.loadingMoreIndicator}>Loading older messages...</div>}
+          {!isFetchingMore && messages.length === 0 && !hasMore && <p style={{ textAlign: 'center', padding: '1rem', color: '#555' }}>Hey! 😊 I'm Nudge. What's on your mind?</p>}
+          {messages.map((msg, i) => (
+            <MessageItem
+              key={msg.id || `${msg.timestamp}-${i}`}
+              msg={msg}
+              index={i}
+              prevMessageTimestamp={i > 0 ? messages[i - 1].timestamp : null}
+              formatReplyPreview={formatReplyPreview}
+              handleContextMenu={handleContextMenuCallback}
+              editingIndex={editingIndex}
+              editValue={editValue}
+              setEditValue={setEditValue}
+              saveEdit={saveEdit}
+              styles={styles}
+            />
+          ))}
+          <div ref={chatEndRef} />
+        </div>
 
-      <form onSubmit={(e) => { e.preventDefault(); if (!loading && input.trim()) sendMessage(); }} style={styles.inputForm}>
-        {replyToIndex !== null && messages[replyToIndex] && (
-          <div style={styles.replyIndicator}>
-            <span style={styles.replyIndicatorText}>
-              Replying to: "{messages[replyToIndex].text.slice(0, 50)}{messages[replyToIndex].text.length > 50 ? "..." : ""}"
-            </span>
-            <button type="button" onClick={() => setReplyToIndex(null)} style={styles.replyIndicatorClose}>&times;</button>
+        {contextMenu.visible && (
+          <div style={{ ...styles.contextMenu, top: contextMenu.y, left: contextMenu.x }}>
+            <div onClick={handleEdit} style={styles.contextItem}>✏️ Edit</div>
+            <div onClick={handleDelete} style={styles.contextItem}>🗑️ Delete</div>
+            <div onClick={handleCopy} style={styles.contextItem}>📋 Copy</div>
+            <div onClick={handleReply} style={styles.contextItem}>↩️ Reply</div>
           </div>
         )}
-        <div style={styles.inputContainer}>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown} 
-            rows={1}
-            style={styles.textArea}
-            placeholder="Type your message..."
-          />
-          <button type="submit" disabled={loading || !input.trim()} style={styles.sendButton}>{loading ? "..." : "Send"}</button>
-        </div>
-      </form>
+
+        {error && <div style={styles.errorBox}>{error}</div>}
+
+        <form onSubmit={(e) => { e.preventDefault(); if (!loading && input.trim()) sendMessage(); }} style={{ ...styles.inputContainer, flexDirection: "column", alignItems: "center", border: "none", background: "transparent", margin: "0" }}>
+          {replyToIndex !== null && messages[replyToIndex] && (
+            <div style={styles.replyIndicator}>
+              <span style={styles.replyIndicatorText}>
+                Replying to: "{messages[replyToIndex].text.slice(0, 50)}{messages[replyToIndex].text.length > 50 ? "..." : ""}"
+              </span>
+              <button type="button" onClick={() => setReplyToIndex(null)} style={styles.replyIndicatorClose}>&times;</button>
+            </div>
+          )}
+          <div style={{ ...styles.inputContainer, width: "calc(100% - 20px)", maxWidth: "800px", border: "1px solid #ccc", borderRadius: "12px", background: "#fff" }}>
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              rows={1}
+              style={styles.textArea}
+              placeholder="type your message..."
+            />
+            <button
+              type="submit"
+              disabled={loading || !input.trim()}
+              style={styles.sendButton}
+            >
+              <img src={upArrow} alt="Send" style={styles.sendButtonImage} />
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
