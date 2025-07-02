@@ -11,7 +11,7 @@ requests
 click
 
 # NLP & ML
-transformers
+transformers== 4.40.2
 torch
 sentence-transformers
 scikit-learn
@@ -24,13 +24,16 @@ keybert
 pymongo
 
 # Utility
-typing_extensions
+typing-extensions
 typing-inspection
 python-jose
 jwt
 bcrypt
 passlib[bcrypt]
 pydantic[email]
+
+# --- Prometheus Integration ---
+tavily-python
 
 # Pin numpy to 1.x for PyTorch + older spacy compatibility
 numpy<2
