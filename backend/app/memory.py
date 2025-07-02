@@ -1,15 +1,15 @@
-from datetime import datetime
+from datetime import datetime, timezone # ADDED: timezone import
 from pymongo import MongoClient
-from bson import ObjectId # Ensure ObjectId is imported for json_serializer_for_mongo_types
+from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
 import os
-import json # Added: needed for json_serializer_for_mongo_types if not already imported
-from typing import List, Dict # Added: for type hints if not already present
+import json
+from typing import List, Dict
 
 from .models import MemoryEntry
 from .nlp_analysis import extract_topic_tags, estimate_emotion
-from .utils import safe_bson_date # Keep this import for safe_bson_date from utils
+from .utils import safe_bson_date
 
 load_dotenv()
 
@@ -40,7 +40,7 @@ def add_message_to_memory(user_id, message, sender="user", task_reference=None, 
     sender = "user" if str(sender).lower() == "user" else "ai"
     emotion, intensity = estimate_emotion(message)
     topic_tags = extract_topic_tags(message)
-    timestamp = datetime.utcnow()
+    timestamp = datetime.now(timezone.utc) # CORRECTED LINE: Using timezone-aware UTC datetime
     salience = compute_salience(emotion, intensity, message, topic_tags)
     repetition_score = compute_repetition_score(user_id, message)
 
@@ -70,7 +70,7 @@ def compute_repetition_score(user_id, new_message):
     return round(min(count / 5, 1.0), 2)
 
 def get_relevant_memory(user_id):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc) # CORRECTED LINE: Using timezone-aware UTC datetime
     user_entries = list(entries_collection.find({"user_id": user_id}))
     relevant = []
 
@@ -79,7 +79,11 @@ def get_relevant_memory(user_id):
         entry_ts = safe_bson_date(entry.get("timestamp"))
         
         # Ensure entry_ts is a datetime object before calculating days_old
+        # Also ensure comparison is with timezone-aware objects if entry_ts is timezone-aware
         if entry_ts:
+            # If entry_ts is naive, make it timezone-aware UTC for consistent comparison
+            if entry_ts.tzinfo is None:
+                entry_ts = entry_ts.replace(tzinfo=timezone.utc)
             days_old = (now - entry_ts).days
         else:
             days_old = MEMORY_DECAY_DAYS # Fallback if timestamp is missing or invalid
@@ -97,6 +101,31 @@ def get_relevant_memory(user_id):
     return [e for _, e in relevant]
 
 def get_user_memory(user_id, offset=0, limit=20):
+    print(f"DEBUG: get_user_memory called for user_id: {user_id}, offset: {offset}, limit: {limit}")
+    total_count = entries_collection.count_documents({"user_id": user_id})
+    print(f"DEBUG: Total documents found for user {user_id}: {total_count}")
+
+    raw_cursor = entries_collection.find({"user_id": user_id}) \
+        .sort("timestamp", -1) \
+        .skip(offset) \
+        .limit(limit)
+
+    entries = []
+    for entry in raw_cursor:
+        entries.append({
+            **entry,
+            "_id": str(entry["_id"]),
+            "timestamp": entry.get("timestamp").isoformat() + "Z" if entry.get("timestamp") else None,
+        })
+    print(f"DEBUG: First 3 entries being returned by get_user_memory: {entries[:3]}")
+    has_more = (offset + len(entries)) < total_count
+    print(f"DEBUG: hasMore: {has_more}")
+
+    return {
+        "messages": entries,
+        "hasMore": has_more,
+        "totalMessages": total_count
+    }
     total_count = entries_collection.count_documents({"user_id": user_id})
 
     raw_cursor = entries_collection.find({"user_id": user_id}) \
@@ -198,7 +227,7 @@ def json_serializer_for_mongo_types(obj):
     JSON serializer for objects not serializable by default json code
     """
     if isinstance(obj, ObjectId):
-        return str(obj) # Convert ObjectId to string
+        return str(obj)
     if isinstance(obj, datetime):
-        return obj.isoformat() # Convert datetime to ISO format string
+        return obj.isoformat()
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")

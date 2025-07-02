@@ -93,8 +93,12 @@ function Chat() {
         headers: { Authorization: `Bearer ${token}` }
       });
       const responseBody = await res.json();
-      const fetchedMessages = responseBody.messages || [];
-      const hasMoreFromBackend = responseBody.hasMore;
+      
+      // *** CORRECTED LINES HERE ***
+      const fetchedMessages = responseBody.memory.messages || [];
+      const hasMoreFromBackend = responseBody.memory.hasMore;
+      // ***************************
+
       const prevScrollHeight = messagesContainerRef.current ? messagesContainerRef.current.scrollHeight : 0;
 
       setMessages((m) => {
@@ -318,17 +322,19 @@ const styles = {
     slider: { position: "absolute", cursor: "pointer", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: safeMode ? "#FFD54F" : "#ccc", transition: ".4s", borderRadius: "24px" },
     sliderBefore: { position: "absolute", content: "\"\"", height: "18px", width: "18px", left: safeMode ? "28px" : "4px", bottom: "3px", backgroundColor: "white", transition: ".4s", borderRadius: "50%" },
     chat: { flex: 1, overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column", gap: "10px", backgroundColor: "#fff", fontFamily: "'Satoshi', sans-serif" },
-    messageRow: (sender) => ({
+
+messageRow: (sender) => ({
       display: "flex",
       gap: "8px",
-      alignItems: "flex-end",
+      alignItems: "flex-end", // Aligns items at the bottom of the cross axis
+      alignSelf: sender === "user" ? "flex-end" : "flex-start",
       justifyContent: sender === "user" ? "flex-end" : "flex-start",
-      marginLeft: sender === "user" ? "auto" : "unset",
-      marginRight: sender === "ai" ? "auto" : "unset",
       fontFamily: "'Satoshi', sans-serif",
     }),
+
     avatar: { height: "32px", width: "32px", borderRadius: "50%", backgroundColor: "#FFD54F", flexShrink: 0 },
-    bubble: (sender) => ({
+
+bubble: (sender) => ({
       backgroundColor: sender === "user" ? "#FFD54F" : "#F6F4F3",
       color: "black",
       padding: "8px 12px",
@@ -339,6 +345,7 @@ const styles = {
       boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
       fontFamily: "'Satoshi', sans-serif",
     }),
+
     inputContainer: { display: "flex", alignItems: "center", padding: "10px", margin: "10px", border: "1px solid #ccc", borderRadius: "12px", background: "#fff", fontFamily: "'Satoshi', sans-serif" },
     textArea: { flex: 1, borderRadius: "10px", border: "none", padding: "10px 15px", resize: "none", background: "#fff", color: "black", outline: "none", fontFamily: "'Satoshi', sans-serif" },
     sendButton: {
