@@ -37,3 +37,7 @@ tavily-python
 
 # Pin numpy to 1.x for PyTorch + older spacy compatibility
 numpy<2
+
+# --- Added for Proactive Nudging & Notifications ---
+apscheduler
+pywebpush
