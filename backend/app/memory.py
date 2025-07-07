@@ -163,6 +163,18 @@ def get_recent_history(user_id: str, limit: int = 50):
 # ------------------------
 # Trait System
 # ------------------------
+# Add inside app/memory.py
+
+def get_last_conversation_topic(user_id: str) -> str:
+    """
+    Naive extractor of last topic from recent user messages.
+    """
+    history = get_recent_history(user_id, limit=5)
+    user_lines = [msg["content"] for msg in history if msg["sender"] == "user"]
+    if not user_lines:
+        return "something we discussed"
+    # Very basic topic guess from last user message
+    return user_lines[0].split(".")[0][:80]  # first sentence or partial phrase
 
 def update_trait(user_id, trait_name, value):
     traits_doc = traits_collection.find_one({"user_id": user_id})
