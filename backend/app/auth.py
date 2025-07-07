@@ -1,10 +1,9 @@
 import os
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from pymongo import MongoClient
 from dotenv import load_dotenv
-from bson.objectid import ObjectId
 from jose import jwt, JWTError
 from fastapi.security import OAuth2PasswordBearer
 
@@ -13,7 +12,7 @@ load_dotenv()
 
 # Environment variables
 MONGO_URI = os.getenv("MONGO_URI")
-SECRET_KEY = os.getenv("JWT_SECRET", "supersecret")  # Changed to JWT_SECRET to match .env
+SECRET_KEY = os.getenv("JWT_SECRET", "supersecret")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
@@ -29,32 +28,31 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 router = APIRouter(prefix="/auth", tags=["Auth"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-# User creation model
+# ─────────────────────────────────────────────────────────────
+# Models
+# ─────────────────────────────────────────────────────────────
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
 
-# Login model
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
-# ✅ Create JWT token
+# ─────────────────────────────────────────────────────────────
+# Token Utilities
+# ─────────────────────────────────────────────────────────────
 def create_access_token(data: dict):
     return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
 
-# ✅ Token verification
-def verify_token(token: str = Depends(oauth2_scheme)):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise HTTPException(status_code=401, detail="Invalid token payload")
-        return user_id
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token verification failed")
+# ✅ DEV MODE: Always return "ram_nathawat"
+def verify_token(authorization: str = Header(default="Bearer test")) -> str:
+    return "ram_nathawat"
 
-# ✅ Signup Route
+# ─────────────────────────────────────────────────────────────
+# Auth Routes
+# ─────────────────────────────────────────────────────────────
+
 @router.post("/signup")
 def signup(user: UserCreate):
     if users.find_one({"email": user.email}):
@@ -67,7 +65,6 @@ def signup(user: UserCreate):
     else:
         raise HTTPException(status_code=500, detail="Failed to create user")
 
-# ✅ Login Route
 @router.post("/login")
 def login(user: UserLogin):
     db_user = users.find_one({"email": user.email})
@@ -77,11 +74,9 @@ def login(user: UserLogin):
     token = create_access_token(data={"sub": str(db_user["_id"])})
     return {"access_token": token, "token_type": "bearer"}
 
-# ✅ Optional: Check if user exists (debug)
 @router.get("/me/{email}")
 def check_user(email: str):
     user = users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return {"email": user["email"], "id": str(user["_id"])}
-

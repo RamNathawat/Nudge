@@ -16,6 +16,15 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.colors import HexColor
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+# Configure Gemini SDK
+genai.configure(api_key=GOOGLE_API_KEY)
 
 logger = logging.getLogger(__name__)
 

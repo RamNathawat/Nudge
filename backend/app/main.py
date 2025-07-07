@@ -1,99 +1,71 @@
-import os, uuid, json, logging, requests
+import os
+import uuid
+import json
+import logging
+import requests
+import re
+import concurrent.futures
+from datetime import datetime
+from typing import Optional, Dict, List
+
 from fastapi import FastAPI, HTTPException, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
-from typing import Optional, Dict, List
-from dotenv import load_dotenv
 from bson import ObjectId
 from bson.errors import InvalidId
-import re
-from datetime import datetime
-from fastapi.responses import StreamingResponse
-import concurrent.futures
-from .config import config
-from .web_scraper import scrape_search_engine, fetch_page_content
-from .utils import generate_gemini_response, generate_pdf # Make sure generate_pdf is imported
-from .memory import add_message_to_memory # Ensure this is imported to save history
+from dotenv import load_dotenv
+from pymongo import MongoClient
 
-# --- Added for Proactive Nudging ---
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-from app.proactive_nudging import create_and_save_proactive_nudge
-# ---
-
+# --- Local project imports ---
+from app.config import config
+from app.web_scraper import scrape_search_engine, fetch_page_content
+from app.utils import generate_gemini_response, generate_pdf, format_for_gemini, safe_bson_date
 from app.auth import verify_token
 from app.memory import (
-    get_user_memory, add_message_to_memory, get_recent_history,
-    update_trait, get_traits, get_relevant_memory,
-    is_safe_space_mode_enabled, set_safe_space_mode,
-    delete_message_by_id, update_message_by_id,
-    entries_collection, traits_collection
+    get_user_memory, add_message_to_memory, get_recent_history, update_trait,
+    get_traits, get_relevant_memory, is_safe_space_mode_enabled, set_safe_space_mode,
+    delete_message_by_id, update_message_by_id, entries_collection, traits_collection
 )
-from app.behaviour_analyzer import analyze_behavior, is_emotionally_relevant
+from app.behaviour_analyzer import analyze_behavior
 from app.state_inference import infer_emotional_state, summary_emotions
-from app.utils import format_for_gemini, safe_bson_date
 from app.nudge_scoring import calculate_nudging_score
 from app.dark_nudge_engine import generate_dark_nudge
 
+# --- NEMO Cognitive modules ---
+from app.cognition import (
+    internal_monologue, belief_engine, goal_manager, curiosity_engine, dream_mode
+)
+
+# --- Proactive nudging ---
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
+from app.proactive_nudging import create_and_save_proactive_nudge
+
+# ─────────────────────────────
+# Setup
+# ─────────────────────────────
 load_dotenv()
 GEMINI_URL = os.getenv("GEMINI_API_URL")
 if not GEMINI_URL:
     raise RuntimeError("❌ GEMINI_API_URL not set in .env")
 
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-
-# --- Proactive Nudging Scheduler ---
 scheduler = AsyncIOScheduler()
+client = MongoClient("mongodb://localhost:27017/")
+db = client["nudge_db"]
 
-async def check_for_proactive_nudges():
-    """The job that the scheduler will run."""
-    logger.info(f"Scheduler running job at {datetime.now()}...")
-    
-    # Get all unique user IDs from the traits collection
-    all_user_ids = [doc['user_id'] for doc in traits_collection.find({}, {'user_id': 1})]
-
-    for user_id in all_user_ids:
-        logger.info(f"Checking user {user_id} for proactive nudge...")
-        try:
-            # This function handles the logic of whether to nudge and saves it to DB
-            message = create_and_save_proactive_nudge(user_id)
-            if message:
-                logger.info(f"Generated and saved proactive nudge for {user_id}: '{message}'")
-        except Exception as e:
-            logger.error(f"Failed to process proactive nudge for user {user_id}: {e}", exc_info=True)
-
-@app.on_event("startup")
-async def startup_event():
-    # Run the job every hour. For testing, you can change this to minutes=1
-    scheduler.add_job(
-        check_for_proactive_nudges,
-        trigger=IntervalTrigger(hours=1), # CHANGED FROM hours=1
-        id="proactive_nudge_job",
-        name="Check for and send proactive nudges",
-        replace_existing=True,
-    )
-    scheduler.start()
-    logger.info("Proactive Nudge Scheduler started.")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    scheduler.shutdown()
-    logger.info("Proactive Nudge Scheduler shut down.")
-# --- End of Scheduler Setup ---
-
+class Message(BaseModel):
+    message: str
 
 # Helper to serialize ObjectId and datetime for JSON dumping
 def json_serializer_for_mongo_types(obj):
@@ -103,29 +75,155 @@ def json_serializer_for_mongo_types(obj):
         return obj.isoformat()
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
-class Message(BaseModel):
-    message: str
+# ─────────────────────────────
+# Proactive Nudging + Dream Mode Scheduler
+# ─────────────────────────────
+async def check_for_proactive_nudges():
+    """The job that the scheduler will run."""
+    logger.info(f"Scheduler running job at {datetime.now()}...")
+    all_user_ids = [doc['user_id'] for doc in traits_collection.find({}, {'user_id': 1})]
+    for user_id in all_user_ids:
+        logger.info(f"Checking user {user_id} for proactive nudge...")
+        try:
+            message = create_and_save_proactive_nudge(user_id)
+            if message:
+                logger.info(f"[NUDGE] Sent to {user_id}: '{message}'")
+        except Exception as e:
+            logger.error(f"[NUDGE ERROR] {user_id}: {e}", exc_info=True)
 
-@app.get("/memory")
-async def get_memory(user_id: str = Depends(verify_token), offset: int = 0, limit: int = 20):
-    # Note: The original code had a bug where it returned a dictionary. 
-    # The 'get_user_memory' function in memory.py seems to be designed to return a dictionary with 'messages', 'hasMore', etc.
-    # So the following logic is adjusted to work with that structure.
-    memory_data = get_user_memory(user_id, offset, limit)
+@app.on_event("startup")
+async def startup_event():
+    scheduler.add_job(
+        check_for_proactive_nudges,
+        trigger=IntervalTrigger(hours=1),
+        id="proactive_nudge_job",
+        name="Check and send proactive nudges",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: dream_mode.run_dream_cycle("ram_nathawat"), # Example user, should be dynamic if needed
+        trigger=CronTrigger(hour=2, minute=30),
+        id="dream_mode_job",
+        name="NEMO nightly evolution",
+        replace_existing=True
+    )
+    scheduler.start()
+    logger.info("✅ Scheduler started (nudges + dream mode)")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    scheduler.shutdown()
+    logger.info("Scheduler shut down.")
+
+# ─────────────────────────────
+# Chat
+# ─────────────────────────────
+@app.post("/chat")
+async def chat(message: Message, user_id: str = Depends(verify_token)):
+    user_txt = message.message.strip()
     
-    # The memory_data is expected to be a dict like {"messages": [...], "hasMore": ...}
-    # We serialize the contents of the 'messages' list.
-    if "messages" in memory_data and isinstance(memory_data["messages"], list):
-        for entry in memory_data["messages"]:
-            if "_id" in entry and isinstance(entry["_id"], ObjectId):
-                entry["_id"] = str(entry["_id"])
-            if "timestamp" in entry and isinstance(entry["timestamp"], datetime):
-                entry["timestamp"] = safe_bson_date(entry["timestamp"])
+    # ✅ Corrected: Removed timestamp argument
+    add_message_to_memory(user_id=user_id, message=user_txt, sender="user")
 
-    # The original function was trying to return just the list, which might be a bug.
-    # Returning the whole dictionary as received from get_user_memory is safer.
-    return {"memory": memory_data}
+    # --- Pre-computation ---
+    flags = analyze_behavior(user_id, user_txt)
+    emo_state = infer_emotional_state(user_txt, user_id)
+    summary = summary_emotions(emo_state)
+    for emotion, intensity in emo_state.items():
+        update_trait(user_id, emotion, intensity)
 
+    # --- NEMO Cognitive Cycle ---
+    internal_monologue.generate_monologue(user_id, user_txt, summary)
+
+    if "procrastinate" in user_txt.lower() or "again" in user_txt.lower():
+        belief_engine.form_belief(
+            user_id=user_id,
+            belief_text="User struggles with task initiation under emotional fatigue",
+            confidence=0.65,
+            topic_tags=["habit", "emotion", "avoidance"]
+        )
+
+    goal_manager.evaluate_goals(user_id, user_txt)
+    curiosity_engine.track_curiosity(user_id, user_txt, summary)
+
+    # --- Context Preparation ---
+    context_entries = get_relevant_memory(user_id)[:5]
+    full_context = get_recent_history(user_id) + context_entries
+    formatted_context = format_for_gemini(full_context)
+    
+    # --- System Prompt Injection ---
+    formatted_context.insert(0, {
+        "role": "user",
+        "parts": [{
+            "text": (
+                "Important: Be concise, emotionally attuned, strategic, and sarcastic when needed. "
+                "Always prioritize the user's growth, not comfort. 2-3 sentences max. "
+                "Cut unnecessary filler, but keep personality intact. "
+                "Be empathetic and supportive, but also witty and a bit sarcastic if you feel the user needs it or is sad or feeling negative emotions."
+            )
+        }]
+    })
+    formatted_context.append({"role": "user", "parts": [{"text": user_txt}]})
+
+    # --- Gemini API Call ---
+    headers = {"Content-Type": "application/json"}
+    response_content = ""
+    try:
+        gemini_response_obj = {"contents": formatted_context}
+        logger.info(f"Sending to Gemini API: {json.dumps(gemini_response_obj, indent=2)}")
+        
+        response = requests.post(GEMINI_URL, headers=headers, json=gemini_response_obj)
+        response.raise_for_status()
+        gemini_raw = response.json()
+        logger.info(f"Raw Gemini API response: {json.dumps(gemini_raw, indent=2)}")
+
+        if gemini_raw and "candidates" in gemini_raw and gemini_raw["candidates"]:
+            parts = gemini_raw["candidates"][0].get("content", {}).get("parts", [])
+            response_content = parts[0].get("text", "").strip() if parts else ""
+
+        if not response_content:
+            logger.warning("Gemini API returned an empty or unparseable response content.")
+            response_content = "I'm thinking, but didn’t quite land that. Try again?"
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error communicating with Gemini API: {e}")
+        raise HTTPException(status_code=500, detail=f"Error from Gemini API: {e}")
+    except json.JSONDecodeError:
+        logger.error(f"Failed to decode JSON from Gemini API response: {response.text}")
+        raise HTTPException(status_code=500, detail="Invalid JSON response from Gemini API")
+    except Exception as e:
+        logger.error(f"[GEMINI ERROR] {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Gemini API error")
+
+    # --- Post-computation & Response ---
+    # ✅ Corrected: Removed timestamp argument
+    add_message_to_memory(user_id=user_id, message=response_content, sender="ai")
+    return {"response": response_content}
+
+# ─────────────────────────────
+# NEMO Debug Endpoint
+# ─────────────────────────────
+@app.get("/debug_nemo_mind")
+async def debug_nemo_mind(user_id: str = Depends(verify_token)):
+    try:
+        beliefs = list(db["beliefs"].find({"user_id": user_id}).sort("confidence", -1).limit(10))
+        curiosities = list(db["curiosity_traces"].find({"user_id": user_id, "status": "unresolved"}).sort("priority", -1))
+        monologues = list(db["internal_monologues"].find({"user_id": user_id}).sort("generated_at", -1).limit(5))
+        goals = list(db["ai_goals"].find({"user_id": user_id, "status": "in_progress"}))
+
+        return {
+            "beliefs": [{"belief": b["belief"], "confidence": b["confidence"], "tags": b.get("topic_tags", [])} for b in beliefs],
+            "curiosity_queue": [{"question": c["question"], "priority": c["priority"], "trigger": c.get("emotion_trigger", "none")} for c in curiosities],
+            "recent_monologues": [{"thought": m["thought"], "doubt": m["doubt_level"], "emotion": m.get("emotion_trigger")} for m in monologues],
+            "active_goals": [{"goal": g["goal"], "strategy": g.get("strategy"), "deadline": g.get("deadline")} for g in goals]
+        }
+    except Exception as e:
+        logger.error(f"[DEBUG NEMO] Failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to introspect NEMO mind")
+
+# ─────────────────────────────
+# Research Endpoints
+# ─────────────────────────────
 @app.post("/online_search")
 async def online_search_endpoint(request: Request, user_id: str = Depends(verify_token)):
     try:
@@ -148,7 +246,7 @@ async def online_search_endpoint(request: Request, user_id: str = Depends(verify
         references = []
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
-            fetch_futures = {executor.submit(fetch_page_content, url): url for url in unique_urls[:10]} # Limit to 10 fetches for speed
+            fetch_futures = {executor.submit(fetch_page_content, url): url for url in unique_urls[:10]}
             for future in concurrent.futures.as_completed(fetch_futures):
                 snippets, refs = future.result()
                 content_snippets.extend(snippets)
@@ -159,18 +257,16 @@ async def online_search_endpoint(request: Request, user_id: str = Depends(verify
         
         explanation = generate_gemini_response(prompt)
         
-        # Integrate with Nudge's memory
-        add_message_to_memory(user_id, f"Searched for: {search_query}", sender="user")
-        add_message_to_memory(user_id, explanation, sender="ai")
+        # ✅ Corrected: Removed timestamp arguments
+        add_message_to_memory(user_id=user_id, message=f"Searched for: {search_query}", sender="user")
+        add_message_to_memory(user_id=user_id, message=explanation, sender="ai")
 
         return {"explanation": explanation, "references": references}
 
     except Exception as e:
-        logging.error(f"Online search error: {e}")
+        logging.error(f"Online search error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# Add the new Deep Research endpoint
 @app.post("/deep_research")
 async def deep_research_endpoint(request: Request, user_id: str = Depends(verify_token)):
     try:
@@ -183,7 +279,7 @@ async def deep_research_endpoint(request: Request, user_id: str = Depends(verify
         all_references = set()
         current_query = search_query
         
-        for i in range(2): # 2 iterations for deep research
+        for i in range(2):
             with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
                 search_results = []
                 search_futures = [executor.submit(scrape_search_engine, current_query, engine) for engine in config.SEARCH_ENGINES]
@@ -205,121 +301,33 @@ async def deep_research_endpoint(request: Request, user_id: str = Depends(verify
                 refinement_prompt = config.DEEP_RESEARCH_REFINEMENT_PROMPT.format(original_query=search_query) + "\n\n" + "\n".join(all_summaries)
                 refined_queries = generate_gemini_response(refinement_prompt).split('\n')
                 if refined_queries:
-                    current_query = refined_queries[0].strip() # Use the top new query
+                    current_query = refined_queries[0].strip()
 
         report_prompt = config.DEEP_RESEARCH_REPORT_PROMPT.format(search_query=search_query, report_structure="**Structure:**\n- Introduction\n- Key Findings\n- Conclusion", summaries="\n\n".join(all_summaries))
         final_report = generate_gemini_response(report_prompt)
 
-        # Generate PDF
         pdf_buffer = generate_pdf(f"Deep Research Report: {search_query}", final_report, list(all_references))
         
         headers = {'Content-Disposition': f'attachment; filename="Nudge_Research_{search_query[:20]}.pdf"'}
         return StreamingResponse(iter([pdf_buffer.getvalue()]), media_type="application/pdf", headers=headers)
 
     except Exception as e:
-        logging.error(f"Deep research error: {e}")
+        logging.error(f"Deep research error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/chat")
-async def chat(
-    message: Message,
-    user_id: str = Depends(verify_token)
-):
-    user_txt = message.message.strip()
-
-    add_message_to_memory(
-        user_id=user_id,
-        message=user_txt,
-        sender="user",
-    )
-
-    flags = analyze_behavior(user_id, user_txt)
-    emo_state = infer_emotional_state(user_txt, user_id) # Passing user_id here as state_inference supports it
-    summary = summary_emotions(emo_state)
-    if summary: # summary_emotions from state_inference returns a string, not meant to update traits
-        pass # The string summary could be logged or used differently if needed
-    
-    # The trait update loop from the original code seems redundant if state_inference handles it,
-    # but we'll keep it for consistency with the provided code.
-    for emotion, intensity in emo_state.items():
-        update_trait(user_id, emotion, intensity)
-
-    # The original inject_context is kept, but it also has redundant logic.
-    # For clarity, we'll call it as intended in the original code.
-    context_string, flags, emotions = inject_context(user_txt, user_id)
-    
-    context_entries = get_relevant_memory(user_id)[:5]
-    recent_history_entries = get_recent_history(user_id)
-
-    full_context_entries = recent_history_entries + context_entries
-    formatted_context = format_for_gemini(full_context_entries)
-    
-    formatted_context.append({"role": "user", "parts": [{"text": user_txt}]})
-
-    formatted_context.insert(0, {
-    "role": "user",
-    "parts": [{
-        "text": (
-            "Important: Keep your replies short, punchy, and direct—no more than 2-3 sentences. "
-            "Be concise but still sound like Nudge: emotionally aware, witty, and a little sarcastic if needed. "
-            "Cut unnecessary filler, but keep personality intact."
-            "be empathetic and supportive, but also witty and a bit sarcastic if you feel the user needs it or is sad or feeling negative emotions . "
-        )
-    }]
-})
-
-    headers = {
-        "Content-Type": "application/json"
-    }
-
-    response_content = ""
-
-    try:
-        gemini_response_obj = {"contents": formatted_context}
-        logger.info(f"Sending to Gemini API: {json.dumps(gemini_response_obj, indent=2)}")
-
-        response = requests.post(GEMINI_URL, headers=headers, json=gemini_response_obj)
-        response.raise_for_status()
-        gemini_raw_response = response.json()
-        logger.info(f"Raw Gemini API response: {json.dumps(gemini_raw_response, indent=2)}")
-
-        if gemini_raw_response and isinstance(gemini_raw_response, dict):
-            candidates = gemini_raw_response.get("candidates")
-            if candidates and isinstance(candidates, list) and len(candidates) > 0:
-                first_candidate = candidates[0]
-                if first_candidate and isinstance(first_candidate, dict):
-                    content_obj = first_candidate.get("content")
-                    if content_obj and isinstance(content_obj, dict):
-                        parts = content_obj.get("parts")
-                        if parts and isinstance(parts, list) and len(parts) > 0:
-                            text_part = parts[0]
-                            if text_part and isinstance(text_part, dict):
-                                text_value = text_part.get("text")
-                                if text_value is not None:
-                                    response_content = str(text_value).strip()
-
-        if not response_content:
-            logger.warning("Gemini API returned an empty or unparseable response content.")
-            response_content = "I'm sorry, I couldn't generate a response at this time. Could you please try again?"
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error communicating with Gemini API: {e}")
-        raise HTTPException(status_code=500, detail=f"Error from Gemini API: {e}")
-    except json.JSONDecodeError:
-        logger.error(f"Failed to decode JSON from Gemini API response: {response.text}")
-        raise HTTPException(status_code=500, detail="Invalid JSON response from Gemini API")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred in chat function: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error during chat processing.")
-
-    add_message_to_memory(
-        user_id=user_id,
-        message=response_content,
-        sender="ai",
-    )
-    
-    return {"response": response_content}
-
+# ─────────────────────────────
+# Memory and Trait Management
+# ─────────────────────────────
+@app.get("/memory")
+async def get_memory(user_id: str = Depends(verify_token), offset: int = 0, limit: int = 20):
+    memory_data = get_user_memory(user_id, offset, limit)
+    if "messages" in memory_data and isinstance(memory_data["messages"], list):
+        for entry in memory_data["messages"]:
+            if "_id" in entry and isinstance(entry["_id"], ObjectId):
+                entry["_id"] = str(entry["_id"])
+            if "timestamp" in entry and isinstance(entry["timestamp"], datetime):
+                entry["timestamp"] = safe_bson_date(entry["timestamp"])
+    return {"memory": memory_data}
 
 @app.get("/traits")
 async def get_user_traits(user_id: str = Depends(verify_token)):
@@ -338,6 +346,9 @@ async def update_memory(entry_id: str, body: dict, user_id: str = Depends(verify
         return {"message": "Updated"}
     raise HTTPException(404, "Message not found or not yours")
 
+# ─────────────────────────────
+# Utility & Admin Endpoints
+# ─────────────────────────────
 @app.post("/reset-memory")
 def reset_memory():
     entries_collection.delete_many({})
@@ -352,24 +363,3 @@ def reset_traits():
 def toggle_safe_space(enabled: bool, user_id: str = Depends(verify_token)):
     set_safe_space_mode(user_id, bool(enabled))
     return {"status": "ok", "safe_space_mode": enabled}
-
-def inject_context(msg: str, user_id: str):
-    flags = analyze_behavior(user_id, msg)
-    # The logic in state_inference.py for infer_emotional_state is more complex than the original here.
-    # We will use the one from state_inference.py which also updates traits.
-    emo_state = infer_emotional_state(msg, user_id) 
-    summary = summary_emotions(emo_state)
-    
-    # The original loop is redundant if infer_emotional_state in state_inference.py already updates traits.
-    # for emotion, intensity in emo_state.items():
-    #     update_trait(user_id, emotion, intensity)
-    
-    # This context string is primarily for logging/debugging.
-    return (
-        f"\n\n(Recent Interaction History: {json.dumps(get_recent_history(user_id), default=json_serializer_for_mongo_types)} | "
-        f"Relevant Memories: {json.dumps(get_relevant_memory(user_id), default=json_serializer_for_mongo_types)} | "
-        f"Current User Traits: {json.dumps(get_traits(user_id))} | "
-        f"User Behavior Flags: {json.dumps(flags)} | "
-        f"Inferred Emotional State: {json.dumps(emo_state)} | "
-        f"Safe Space Mode: {is_safe_space_mode_enabled(user_id)})"
-    ), flags, emo_state
