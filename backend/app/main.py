@@ -1,5 +1,5 @@
 import os, uuid, json, logging, requests
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import FastAPI, HTTPException, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -9,6 +9,12 @@ from bson import ObjectId
 from bson.errors import InvalidId
 import re
 from datetime import datetime
+from fastapi.responses import StreamingResponse
+import concurrent.futures
+from .config import config
+from .web_scraper import scrape_search_engine, fetch_page_content
+from .utils import generate_gemini_response, generate_pdf # Make sure generate_pdf is imported
+from .memory import add_message_to_memory # Ensure this is imported to save history
 
 # --- Added for Proactive Nudging ---
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -120,6 +126,99 @@ async def get_memory(user_id: str = Depends(verify_token), offset: int = 0, limi
     # Returning the whole dictionary as received from get_user_memory is safer.
     return {"memory": memory_data}
 
+@app.post("/online_search")
+async def online_search_endpoint(request: Request, user_id: str = Depends(verify_token)):
+    try:
+        data = await request.json()
+        search_query = data.get('query', '')
+        if not search_query:
+            raise HTTPException(status_code=400, detail="No query provided")
+
+        search_results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
+            search_futures = [executor.submit(scrape_search_engine, search_query, engine) for engine in config.SEARCH_ENGINES]
+            for future in concurrent.futures.as_completed(search_futures):
+                search_results.extend(future.result())
+
+        if not search_results:
+            raise HTTPException(status_code=404, detail="No results found")
+        
+        unique_urls = list(set(search_results))
+        content_snippets = []
+        references = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
+            fetch_futures = {executor.submit(fetch_page_content, url): url for url in unique_urls[:10]} # Limit to 10 fetches for speed
+            for future in concurrent.futures.as_completed(fetch_futures):
+                snippets, refs = future.result()
+                content_snippets.extend(snippets)
+                references.extend(refs)
+        
+        combined_content = "\n\n".join(content_snippets)
+        prompt = f"Analyze web content for: '{search_query}'. Extract key facts and details. Be concise. Content:\n\n{combined_content}"
+        
+        explanation = generate_gemini_response(prompt)
+        
+        # Integrate with Nudge's memory
+        add_message_to_memory(user_id, f"Searched for: {search_query}", sender="user")
+        add_message_to_memory(user_id, explanation, sender="ai")
+
+        return {"explanation": explanation, "references": references}
+
+    except Exception as e:
+        logging.error(f"Online search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Add the new Deep Research endpoint
+@app.post("/deep_research")
+async def deep_research_endpoint(request: Request, user_id: str = Depends(verify_token)):
+    try:
+        data = await request.json()
+        search_query = data.get('query', '')
+        if not search_query:
+            raise HTTPException(status_code=400, detail="No query provided")
+
+        all_summaries = []
+        all_references = set()
+        current_query = search_query
+        
+        for i in range(2): # 2 iterations for deep research
+            with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
+                search_results = []
+                search_futures = [executor.submit(scrape_search_engine, current_query, engine) for engine in config.SEARCH_ENGINES]
+                for future in concurrent.futures.as_completed(search_futures):
+                    search_results.extend(future.result())
+                
+                unique_urls = list(set(search_results) - all_references)
+                all_references.update(unique_urls)
+
+                fetch_futures = {executor.submit(fetch_page_content, url): url for url in unique_urls[:5]}
+                for future in concurrent.futures.as_completed(fetch_futures):
+                    snippets, _ = future.result()
+                    if snippets:
+                        summary_prompt = config.DEEP_RESEARCH_SUMMARY_PROMPT.format(query=current_query) + "\n\n" + "\n".join(snippets)
+                        summary = generate_gemini_response(summary_prompt)
+                        all_summaries.append(summary)
+
+            if i < 1 and all_summaries:
+                refinement_prompt = config.DEEP_RESEARCH_REFINEMENT_PROMPT.format(original_query=search_query) + "\n\n" + "\n".join(all_summaries)
+                refined_queries = generate_gemini_response(refinement_prompt).split('\n')
+                if refined_queries:
+                    current_query = refined_queries[0].strip() # Use the top new query
+
+        report_prompt = config.DEEP_RESEARCH_REPORT_PROMPT.format(search_query=search_query, report_structure="**Structure:**\n- Introduction\n- Key Findings\n- Conclusion", summaries="\n\n".join(all_summaries))
+        final_report = generate_gemini_response(report_prompt)
+
+        # Generate PDF
+        pdf_buffer = generate_pdf(f"Deep Research Report: {search_query}", final_report, list(all_references))
+        
+        headers = {'Content-Disposition': f'attachment; filename="Nudge_Research_{search_query[:20]}.pdf"'}
+        return StreamingResponse(iter([pdf_buffer.getvalue()]), media_type="application/pdf", headers=headers)
+
+    except Exception as e:
+        logging.error(f"Deep research error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat")
 async def chat(

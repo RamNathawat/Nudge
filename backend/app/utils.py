@@ -1,10 +1,25 @@
-# In app/utils.py
+# backend/app/utils.py
 
-from datetime import datetime
-from typing import List, Dict
 import logging
+import json
+import re
+from datetime import date, datetime
+from typing import List, Dict, Union
+from io import BytesIO
+
+import google.generativeai as genai
+from tenacity import retry, wait_exponential, stop_after_attempt
+
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+from reportlab.lib.colors import HexColor
 
 logger = logging.getLogger(__name__)
+
+# --- Original Nudge Functions ---
 
 def safe_bson_date(date):
     """
@@ -19,45 +34,102 @@ def format_for_gemini(conversation_slice: List[Dict]) -> List[Dict]:
     """
     Formats conversation history for Gemini API chat completion.
     """
-
     formatted_content = []
-    total_chars = 0
-    max_chars = 6000
-
     for entry in conversation_slice:
-        # Ensure 'content' key exists. If not, this entry cannot be used.
-        if "content" not in entry:
-            logger.warning(f"Skipping conversation entry due to missing 'content' field: {entry}")
-            continue
-
-        # Safely get 'role'. If missing, provide a default and log a warning.
-        role = entry.get("sender") # Use 'sender' from your DB entry as the role
-        if role is None:
-            logger.warning(f"Conversation entry missing 'sender' field, defaulting to 'user': {entry}")
-            role = "user" # Default to 'user' if sender is missing.
-
-        text = entry["content"].strip() # *** Changed from entry["text"] to entry["content"] ***
-
-        # Map internal roles to Gemini-friendly ones
-        if role == "system":
-            role = "user"  # Gemini doesn't formally support 'system' role in the chat body
-        elif role == "ai":
+        role = entry.get("sender", "user")
+        if role == "ai":
             role = "model"
-        # If 'role' was initially missing and defaulted to 'user', it will stay 'user'.
-
-        # Skip empty or whitespace-only texts
+        
+        text = entry.get("content", "").strip()
         if not text:
             continue
-
-        # Enforce hard max total char limit
-        if total_chars + len(text) > max_chars:
-            break
 
         formatted_content.append({
             "role": role,
             "parts": [{"text": text}]
         })
-
-        total_chars += len(text)
-    
     return formatted_content
+
+# --- New Integrated Functions ---
+
+@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
+def generate_gemini_response(prompt: str, model_name: str = "gemini-1.5-flash", response_format: str = "markdown") -> Union[str, Dict, List]:
+    """Generates a response from Gemini, handling retries and different formats."""
+    safety_settings = {
+        "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+        "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+        "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+    }
+    model = genai.GenerativeModel(model_name=model_name)
+    try:
+        response = model.generate_content(prompt, safety_settings=safety_settings)
+        text_response = response.text
+
+        if response_format == "json":
+            try:
+                response_text_cleaned = re.sub(r"```json\n?|```", "", text_response).strip()
+                return json.loads(response_text_cleaned)
+            except json.JSONDecodeError:
+                logging.warning(f"Invalid JSON from Gemini, returning raw text: {text_response}")
+                return {"error": "Invalid JSON", "raw_text": text_response}
+        
+        text_response = text_response.replace("```markdown", "").replace("```", "").strip()
+        return text_response
+        
+    except Exception as e:
+        logging.error(f"Gemini error: {e}")
+        raise
+
+def generate_pdf(report_title: str, content: str, references: List[str]) -> BytesIO:
+    """Generates a PDF document from text content and references."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=0.7*inch, leftMargin=0.7*inch, topMargin=0.7*inch, bottomMargin=0.7*inch)
+    styles = getSampleStyleSheet()
+    
+    custom_styles = {
+        'Title': ParagraphStyle('CustomTitle', parent=styles['Heading1'], fontSize=24, leading=32, spaceAfter=20, alignment=TA_CENTER, textColor=HexColor("#1a237e"), fontName='Helvetica-Bold'),
+        'Heading1': ParagraphStyle('CustomHeading1', parent=styles['Heading1'], fontSize=18, leading=24, spaceBefore=20, spaceAfter=12, textColor=HexColor("#283593"), fontName='Helvetica-Bold'),
+        'Paragraph': ParagraphStyle('CustomParagraph', parent=styles['Normal'], fontSize=11, leading=16, spaceAfter=10, alignment=TA_JUSTIFY),
+        'Reference': ParagraphStyle('CustomReference', parent=styles['Normal'], fontSize=10, leading=14, spaceAfter=4, textColor=HexColor("#1565c0"), leftIndent=0.5*inch),
+        'Footer': ParagraphStyle('CustomFooter', parent=styles['Italic'], fontSize=9, alignment=TA_CENTER, textColor=HexColor("#757575"), spaceBefore=24)
+    }
+
+    def clean_text(text):
+        text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+        text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
+        text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        return text.strip()
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        footer_text = f"Generated by Nudge AI • {date.today().strftime('%B %d, %Y')}"
+        p = Paragraph(footer_text, custom_styles['Footer'])
+        w, h = p.wrap(doc.width, doc.bottomMargin)
+        p.drawOn(canvas, doc.leftMargin, h)
+        canvas.restoreState()
+
+    story = []
+    story.append(Paragraph(report_title, custom_styles['Title']))
+    
+    for line in content.split('\n'):
+        line = line.strip()
+        if not line:
+            story.append(Spacer(1, 0.1*inch))
+            continue
+        if line.startswith('## '):
+            story.append(Paragraph(clean_text(line[3:]), custom_styles['Heading1']))
+        elif line.startswith('* ') or line.startswith('- '):
+            story.append(Paragraph(f"• {clean_text(line[2:])}", styles['Bullet']))
+        else:
+            story.append(Paragraph(clean_text(line), custom_styles['Paragraph']))
+
+    if references:
+        story.append(PageBreak())
+        story.append(Paragraph("References", custom_styles['Heading1']))
+        for i, ref in enumerate(references, 1):
+            story.append(Paragraph(f"[{i}] {ref}", custom_styles['Reference']))
+            
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    buffer.seek(0)
+    return buffer
