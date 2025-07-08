@@ -18,11 +18,13 @@ class Belief(BaseModel):
     def to_mongo(self):
         return self.dict()
 
-# ✅ 2. Goal Model
+# ✅ 2. Goal Model (MODIFIED)
 class Goal(BaseModel):
     user_id: str
     goal: str
     status: str = "in_progress"  # or: "complete", "failed"
+    # --- NEW FIELD ---
+    goal_type: Optional[str] = "user" # Default to 'user', can be 'deep_learning' for AI
     strategy: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     deadline: Optional[datetime] = None

@@ -56,3 +56,5 @@ docx2txt
 tenacity
 
 google-generativeai
+neo4j
+spacy

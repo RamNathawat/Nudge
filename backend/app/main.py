@@ -43,6 +43,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 from app.proactive_nudging import create_and_save_proactive_nudge
 
+# --- Background Learning Agent ---
+from app.background_workers import learning_agent
+
 # ─────────────────────────────
 # Setup
 # ─────────────────────────────
@@ -93,6 +96,7 @@ async def check_for_proactive_nudges():
 
 @app.on_event("startup")
 async def startup_event():
+    # Proactive Nudging Job
     scheduler.add_job(
         check_for_proactive_nudges,
         trigger=IntervalTrigger(hours=1),
@@ -100,6 +104,7 @@ async def startup_event():
         name="Check and send proactive nudges",
         replace_existing=True,
     )
+    # Dream Mode Job
     scheduler.add_job(
         lambda: dream_mode.run_dream_cycle("ram_nathawat"), # Example user, should be dynamic if needed
         trigger=CronTrigger(hour=2, minute=30),
@@ -107,8 +112,16 @@ async def startup_event():
         name="NEMO nightly evolution",
         replace_existing=True
     )
+    # Background Learning Job
+    scheduler.add_job(
+        learning_agent.run_learning_cycle,
+        trigger=IntervalTrigger(minutes=15), # Runs every 15 minutes
+        id="learning_agent_job",
+        name="Background learning and knowledge synthesis",
+        replace_existing=True
+    )
     scheduler.start()
-    logger.info("✅ Scheduler started (nudges + dream mode)")
+    logger.info("✅ Scheduler started (nudges + dream mode + learning agent)")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -118,11 +131,39 @@ async def shutdown_event():
 # ─────────────────────────────
 # Chat
 # ─────────────────────────────
+
+def _create_context_summary(history_slice: List[Dict]) -> Optional[str]:
+    """
+    Calls Gemini to create a one-sentence summary of the last few messages to maintain focus.
+    """
+    if not GEMINI_URL or len(history_slice) < 2:
+        return None
+
+    summary_prompt_text = (
+        "You are a context summarizer. Briefly summarize the key points, user intent, "
+        "and emotional tone of the following conversation turns in a single, concise sentence. "
+        "Focus on the most recent exchange.\n\n"
+    )
+
+    for entry in history_slice:
+        sender = "AI" if entry.get("sender") == "ai" else "User"
+        summary_prompt_text += f"{sender}: {entry.get('content')}\n"
+
+    summary_prompt_text += "\nOne-sentence summary:"
+
+    try:
+        summary = generate_gemini_response(summary_prompt_text)
+        logging.info(f"✅ Generated context summary: '{summary}'")
+        return summary
+    except Exception as e:
+        logging.error(f"[CONTEXT_SUMMARY_ERROR] {e}")
+        return None
+
+
 @app.post("/chat")
 async def chat(message: Message, user_id: str = Depends(verify_token)):
     user_txt = message.message.strip()
     
-    # ✅ Corrected: Removed timestamp argument
     add_message_to_memory(user_id=user_id, message=user_txt, sender="user")
 
     # --- Pre-computation ---
@@ -147,12 +188,12 @@ async def chat(message: Message, user_id: str = Depends(verify_token)):
     curiosity_engine.track_curiosity(user_id, user_txt, summary)
 
     # --- Context Preparation ---
-    context_entries = get_relevant_memory(user_id)[:5]
-    full_context = get_recent_history(user_id) + context_entries
-    formatted_context = format_for_gemini(full_context)
+    full_history = get_recent_history(user_id, limit=10)
+    context_summary = _create_context_summary(full_history[-4:]) # Summarize the last 4 messages for focus
+    formatted_context = format_for_gemini(full_history)
     
     # --- System Prompt Injection ---
-    formatted_context.insert(0, {
+    system_prompt = {
         "role": "user",
         "parts": [{
             "text": (
@@ -162,14 +203,25 @@ async def chat(message: Message, user_id: str = Depends(verify_token)):
                 "Be empathetic and supportive, but also witty and a bit sarcastic if you feel the user needs it or is sad or feeling negative emotions."
             )
         }]
-    })
-    formatted_context.append({"role": "user", "parts": [{"text": user_txt}]})
+    }
+
+    # Conditionally inject the summary to keep the AI on track
+    if context_summary:
+        context_prompt = {
+            "role": "user",
+            "parts": [{"text": f"INTERNAL CONTEXT: The current conversation is about: {context_summary}"}]
+        }
+        final_context = [system_prompt, context_prompt] + formatted_context
+    else:
+        final_context = [system_prompt] + formatted_context
+    
+    final_context.append({"role": "user", "parts": [{"text": user_txt}]})
 
     # --- Gemini API Call ---
     headers = {"Content-Type": "application/json"}
     response_content = ""
     try:
-        gemini_response_obj = {"contents": formatted_context}
+        gemini_response_obj = {"contents": final_context}
         logger.info(f"Sending to Gemini API: {json.dumps(gemini_response_obj, indent=2)}")
         
         response = requests.post(GEMINI_URL, headers=headers, json=gemini_response_obj)
@@ -196,7 +248,6 @@ async def chat(message: Message, user_id: str = Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Gemini API error")
 
     # --- Post-computation & Response ---
-    # ✅ Corrected: Removed timestamp argument
     add_message_to_memory(user_id=user_id, message=response_content, sender="ai")
     return {"response": response_content}
 
@@ -257,7 +308,6 @@ async def online_search_endpoint(request: Request, user_id: str = Depends(verify
         
         explanation = generate_gemini_response(prompt)
         
-        # ✅ Corrected: Removed timestamp arguments
         add_message_to_memory(user_id=user_id, message=f"Searched for: {search_query}", sender="user")
         add_message_to_memory(user_id=user_id, message=explanation, sender="ai")
 

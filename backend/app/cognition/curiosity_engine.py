@@ -1,3 +1,5 @@
+# backend/app/cognition/curiosity_engine.py
+
 from datetime import datetime, timedelta
 from pymongo import MongoClient, errors
 from bson.objectid import ObjectId
@@ -7,6 +9,10 @@ import difflib
 import os
 import requests
 from dotenv import load_dotenv
+from typing import Optional  # Added missing import
+
+# --- NEW: Import the goal manager to create learning goals ---
+from . import goal_manager 
 
 load_dotenv()
 GEMINI_URL = os.getenv("GEMINI_API_URL")
@@ -15,16 +21,62 @@ client = MongoClient("mongodb://localhost:27017/")
 db = client["nudge_db"]
 curiosity_collection = db["curiosity_traces"]
 
+# Configure logging
+logger = logging.getLogger(__name__)  # Added missing logger
+
 # --- Configurable thresholds ---
 DUPLICATE_WINDOW_MINUTES = 30
 SIMILARITY_THRESHOLD = 0.85
 
 
+# --- NEW HELPER FUNCTION: To identify knowledge-based topics ---
+def _infer_topic_from_input(user_input: str) -> Optional[str]:
+    """
+    Uses heuristics to identify if the user is asking about a specific topic.
+    Returns the topic name if found, otherwise None.
+    """
+    lowered = user_input.lower()
+    # Patterns that suggest a request for knowledge
+    patterns = [
+        r"tell me about (.+)",
+        r"what is (.+)",
+        r"what are (.+)",
+        r"explain (.+)",
+        r"who is (.+)",
+        r"do you know about (.+)"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if match:
+            # Extract the topic, removing trailing question marks
+            topic = match.group(1).strip().rstrip("?").title()
+            return topic
+    return None
+
+
 def track_curiosity(user_id: str, user_input: str, emotion_state: str = "neutral", source_id: str = None) -> dict:
     """
-    Tracks user-triggered curiosity. Uses heuristics first, then falls back to LLM.
-    Prevents duplicate entries. Assigns priority and links to optional belief thread.
+    Tracks user-triggered curiosity.
+    NEW: First checks for knowledge topics to create learning goals.
+    Then, falls back to generating psychological questions about the user.
     """
+    # --- NEW LOGIC: Prioritize Topic-Based Learning ---
+    topic = _infer_topic_from_input(user_input)
+    if topic:
+        logger.info(f"Identified knowledge topic: '{topic}'. Creating a deep learning goal.")
+        # Create a long-term learning goal for the background agent
+        goal_manager.create_goal(
+            user_id=user_id,
+            goal_text=f"Master Topic: {topic}",
+            strategy="Trigger background research and knowledge graph synthesis.",
+            deadline_days=90, # Long-term goal
+            # Custom type to distinguish from regular goals
+            goal_type="deep_learning" 
+        )
+        return {"msg": f"Curiosity triggered a new learning goal for topic: {topic}"}
+
+    # --- Original Logic: Generate psychological questions ---
     try:
         now = datetime.utcnow()
         question = _infer_question(user_input, emotion_state)
@@ -33,10 +85,10 @@ def track_curiosity(user_id: str, user_input: str, emotion_state: str = "neutral
             question = _llm_infer_question(user_input, emotion_state)
 
         if not question:
-            return {"msg": "No curiosity triggered."}
+            return {"msg": "No psychological curiosity triggered."}
 
         if _is_duplicate(user_id, question, now):
-            return {"msg": "Duplicate curiosity avoided."}
+            return {"msg": "Duplicate psychological curiosity avoided."}
 
         trace = {
             "user_id": user_id,
@@ -50,11 +102,11 @@ def track_curiosity(user_id: str, user_input: str, emotion_state: str = "neutral
             "input_reference": user_input,
             "source_message_id": source_id,
             "thread_id": _assign_thread_id(question),
-            "linked_beliefs": [],  # Placeholder for future linking
+            "linked_beliefs": [],
         }
 
         curiosity_collection.insert_one(trace)
-        return {"msg": f"Curiosity added: {question}"}
+        return {"msg": f"Psychological curiosity added: {question}"}
 
     except errors.PyMongoError as e:
         logging.error(f"[CURIOSITY ENGINE ERROR] {e}")
@@ -64,20 +116,20 @@ def track_curiosity(user_id: str, user_input: str, emotion_state: str = "neutral
         return {"msg": "Unexpected error"}
 
 
-# --- Heuristic rules ---
+# --- Heuristic rules for psychological questions ---
 def _infer_question(user_input: str, emotion: str) -> str:
     lowered = user_input.lower()
 
-    if "i don’t care" in lowered and re.search(r"like|view|followers", lowered):
+    if "i don't care" in lowered and re.search(r"like|view|followers", lowered):
         return "Why does Ram seek validation while claiming not to care?"
-    if "i know i should" in lowered and re.search(r"but|can't|don’t", lowered):
-        return "What’s blocking Ram from doing what he believes he should?"
+    if "i know i should" in lowered and re.search(r"but|can't|don't", lowered):
+        return "What's blocking Ram from doing what he believes he should?"
     if "i always" in lowered or "i never" in lowered:
         return "Is Ram using cognitive distortions like absolutes in self-assessment?"
     if "i give up" in lowered and emotion in ["shame", "anger", "disgust"]:
-        return "Does Ram feel hopeless when things aren’t instantly successful?"
+        return "Does Ram feel hopeless when things aren't instantly successful?"
     if "no point" in lowered or "why bother" in lowered:
-        return "Has Ram developed a belief that effort won’t change outcomes?"
+        return "Has Ram developed a belief that effort won't change outcomes?"
 
     return None
 
