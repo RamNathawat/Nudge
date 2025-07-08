@@ -1,8 +1,80 @@
-# app/cognition/dream_mode.py
+import os
+import re
+import requests
+import logging
+from datetime import datetime
+from pymongo import MongoClient
+from collections import Counter
+from bson.objectid import ObjectId
 
+from .belief_model import Belief, Monologue
+from .belief_evolution import (
+    reinforce_beliefs,
+    decay_unused_beliefs,
+    detect_contradictory_pairs,
+    synthesize_contradictions
+)
+
+
+# Setup
+client = MongoClient("mongodb://localhost:27017/")
+db = client["nudge_db"]
+beliefs_collection = db["beliefs"]
+monologue_collection = db["internal_monologues"]
+curiosity_collection = db["curiosity_traces"]
+goals_collection = db["ai_goals"]
+
+logger = logging.getLogger("nemo_dream_mode")
+logging.basicConfig(level=logging.INFO)
+
+
+def run_dream_cycle(user_id: str) -> dict:
+    logger.info(f"🌙 [DREAM MODE] Starting memory evolution for {user_id}...")
+    summary = {
+        "new_beliefs": 0,
+        "reinforced_beliefs": 0,
+        "decayed_beliefs": 0,
+        "conflicts_found": 0,
+        "synthesized_beliefs": 0,
+        "goals_failed": 0,
+        "curiosities_reviewed": 0,
+        "curiosities_resolved": 0,
+        "goals_promoted": 0
+    }
+
+    try:
+        thoughts = compress_monologues(user_id)
+        summary["new_beliefs"] = thoughts["new_beliefs"]
+
+        summary["reinforced_beliefs"] = reinforce_beliefs(user_id, thoughts["thoughts"])
+        summary["decayed_beliefs"] = decay_unused_beliefs(user_id)
+
+        beliefs = list(beliefs_collection.find({"user_id": user_id}))
+        contradiction_pairs = detect_contradictory_pairs(beliefs)
+        summary["conflicts_found"] = len(contradiction_pairs)
+        synth = synthesize_contradictions(user_id, contradiction_pairs)
+        summary["synthesized_beliefs"] = len(synth)
+
+        summary.update(update_goals(user_id))
+        summary.update(review_curiosity(user_id))
+
+        generate_self_reflective_monologue(user_id, summary)
+
+        logger.info(f"✅ [DREAM MODE] Completed cycle for {user_id}")
+        return {"status": "success", "summary": summary}
+
+    except Exception as e:
+        logger.error(f"[DREAM MODE ERROR] {e}")
+        return {"status": "error", "msg": str(e)}
 from pymongo import MongoClient
 from datetime import datetime
-from .belief_model import Belief
+from .belief_model import Belief, Monologue
+from .belief_evolution import (
+    reinforce_beliefs,
+    decay_unused_beliefs,
+    detect_contradictory_pairs,
+    synthesize_contradictions
+)
 from collections import Counter
 from bson.objectid import ObjectId
 import logging
@@ -19,39 +91,16 @@ goals_collection = db["ai_goals"]
 logger = logging.getLogger("nemo_dream_mode")
 logging.basicConfig(level=logging.INFO)
 
-
-def run_dream_cycle(user_id: str) -> dict:
-    logger.info(f"🌙 [DREAM MODE] Starting memory evolution for {user_id}...")
-
-    try:
-        compress_monologues(user_id)
-        resolve_conflicting_beliefs(user_id)
-        update_goals(user_id)
-        review_curiosity(user_id)
-
-        logger.info(f"✅ [DREAM MODE] Completed cycle for {user_id}")
-        return {"status": "success", "msg": "Dream cycle completed"}
-
-    except Exception as e:
-        logger.error(f"[DREAM MODE ERROR] {e}")
-        return {"status": "error", "msg": str(e)}
-
-
-# ─── MONOLOGUE COMPRESSION ────────────────────────────────────────────────
-
 def compress_monologues(user_id: str):
-    last_monologues = list(monologue_collection.find(
+    monologues = list(monologue_collection.find(
         {"user_id": user_id}
     ).sort("generated_at", -1).limit(50))
 
-    if not last_monologues:
-        return
-
-    thoughts = [m.get("thought") for m in last_monologues if "thought" in m]
-    emotions = [m.get("emotion_trigger", "neutral") for m in last_monologues]
+    thoughts = [m.get("thought") for m in monologues if "thought" in m]
+    emotions = [m.get("emotion_trigger", "neutral") for m in monologues]
 
     common_thoughts = Counter(thoughts).most_common(2)
-    common_emotions = Counter(emotions).most_common(2)
+    stats = {"new_beliefs": 0, "thoughts": thoughts}
 
     for thought, freq in common_thoughts:
         if freq >= 3:
@@ -64,58 +113,14 @@ def compress_monologues(user_id: str):
                 source="dream_mode"
             )
             beliefs_collection.insert_one(belief.to_mongo())
-            logger.info(f"[DREAM] New belief created from monologue: {belief_text}")
+            stats["new_beliefs"] += 1
+            logger.info(f"[DREAM] Created belief from monologue: {belief_text}")
 
-
-# ─── BELIEF CONFLICT DETECTION ────────────────────────────────────────────
-
-def resolve_conflicting_beliefs(user_id: str):
-    beliefs = list(beliefs_collection.find({"user_id": user_id}))
-    conflict_pairs = []
-
-    for i, b1 in enumerate(beliefs):
-        for j, b2 in enumerate(beliefs):
-            if i >= j:
-                continue
-            if is_contradictory(b1["belief"], b2["belief"]):
-                conflict_pairs.append((b1["belief"], b2["belief"]))
-
-    for b1, b2 in conflict_pairs[:3]:  # limit to 3 per cycle
-        question = f"Why do I believe both: '{b1}' AND '{b2}'?"
-        curiosity_collection.insert_one({
-            "user_id": user_id,
-            "question": question,
-            "status": "unresolved",
-            "priority": 0.85,
-            "emotion_trigger": "contradiction",
-            "created_at": datetime.utcnow(),
-            "input_reference": "[dream_mode_conflict]"
-        })
-        logger.info(f"[DREAM] Belief contradiction flagged: {question}")
-
-
-def is_contradictory(b1: str, b2: str) -> bool:
-    b1_clean = b1.lower()
-    b2_clean = b2.lower()
-
-    # Absolute statements conflict (e.g., "always" vs "never")
-    if re.search(r"\balways\b", b1_clean) and re.search(r"\bnever\b", b2_clean):
-        return True
-
-    # Negation conflict (primitive)
-    if "not" in b1_clean and any(word in b1_clean for word in b2_clean.split()):
-        return True
-
-    if "not" in b2_clean and any(word in b2_clean for word in b1_clean.split()):
-        return True
-
-    return False
-
-
-# ─── GOAL STATUS EVALUATION ──────────────────────────────────────────────
-
+    return stats
 def update_goals(user_id: str):
     now = datetime.utcnow()
+    stats = {"goals_failed": 0}
+
     active_goals = goals_collection.find({
         "user_id": user_id,
         "status": "in_progress"
@@ -128,20 +133,128 @@ def update_goals(user_id: str):
                 {"_id": goal["_id"]},
                 {"$set": {"status": "failed", "last_updated": now}}
             )
-            logger.warning(f"[DREAM] Goal expired and marked as failed: {goal['goal']}")
+            logger.warning(f"[DREAM] Goal expired: {goal['goal']}")
+            stats["goals_failed"] += 1
 
+    return stats
 
-# ─── CURIOSITY REVIEW ─────────────────────────────────────────────────────
+def run_dream_cycle(user_id: str) -> dict:
+    logger.info(f"🌙 [DREAM MODE] Starting memory evolution for {user_id}...")
+    summary = {
+        "new_beliefs": 0,
+        "reinforced_beliefs": 0,
+        "decayed_beliefs": 0,
+        "conflicts_found": 0,
+        "synthesized_beliefs": 0,
+        "goals_failed": 0,
+        "curiosities_reviewed": 0,
+        "curiosities_resolved": 0,
+        "goals_promoted": 0
+    }
 
+    try:
+        thoughts = compress_monologues(user_id)
+        summary["new_beliefs"] = thoughts["new_beliefs"]
+
+        summary["reinforced_beliefs"] = reinforce_beliefs(user_id, thoughts["thoughts"])
+        summary["decayed_beliefs"] = decay_unused_beliefs(user_id)
+
+        beliefs = list(beliefs_collection.find({"user_id": user_id}))
+        contradiction_pairs = detect_contradictory_pairs(beliefs)
+        summary["conflicts_found"] = len(contradiction_pairs)
+        synth = synthesize_contradictions(user_id, contradiction_pairs)
+        summary["synthesized_beliefs"] = len(synth)
+
+        summary.update(update_goals(user_id))
+        summary.update(review_curiosity(user_id))
+
+        generate_self_reflective_monologue(user_id, summary)
+
+        logger.info(f"✅ [DREAM MODE] Completed cycle for {user_id}")
+        return {"status": "success", "summary": summary}
+
+    except Exception as e:
+        logger.error(f"[DREAM MODE ERROR] {e}")
+        return {"status": "error", "msg": str(e)}
 def review_curiosity(user_id: str):
+    stats = {
+        "curiosities_reviewed": 0,
+        "curiosities_resolved": 0,
+        "goals_promoted": 0
+    }
+
     open_questions = list(curiosity_collection.find({
         "user_id": user_id,
         "status": "unresolved"
-    }).sort("priority", -1).limit(3))
+    }).sort("priority", -1).limit(5))
 
+    now = datetime.utcnow()
     for q in open_questions:
+        stats["curiosities_reviewed"] += 1
         curiosity_collection.update_one(
             {"_id": q["_id"]},
-            {"$set": {"last_reviewed": datetime.utcnow()}}
+            {"$set": {"last_reviewed": now}}
         )
-        logger.info(f"[DREAM] Reviewing curiosity: {q['question']}")
+
+        if q.get("priority", 0) <= 0.4:
+            resolved = resolve_with_llm(q["question"])
+            if resolved:
+                curiosity_collection.update_one(
+                    {"_id": q["_id"]},
+                    {"$set": {
+                        "status": "resolved",
+                        "resolved_answer": resolved,
+                        "last_reviewed": now
+                    }}
+                )
+                belief = Belief(
+                    user_id=user_id,
+                    belief=resolved,
+                    confidence=0.6,
+                    topic_tags=["curiosity", "introspection"],
+                    source="curiosity_resolution"
+                )
+                beliefs_collection.insert_one(belief.to_mongo())
+                stats["curiosities_resolved"] += 1
+
+        elif q.get("priority", 0) >= 0.8:
+            goal = {
+                "user_id": user_id,
+                "goal": f"Answer: {q['question']}",
+                "status": "in_progress",
+                "source": "dream_mode_promotion",
+                "created_at": now
+            }
+            goals_collection.insert_one(goal)
+            stats["goals_promoted"] += 1
+
+    return stats
+
+def resolve_with_llm(question: str) -> str:
+    GEMINI_URL = os.getenv("GEMINI_API_URL")
+    if not GEMINI_URL:
+        return None
+    try:
+        prompt = f"Reflect on this internal question and offer a short, thoughtful belief-like answer:\n'{question}'"
+        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(GEMINI_URL, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+    except Exception as e:
+        logger.error(f"[GEMINI_RESOLVE] {e}")
+        return None
+
+def generate_self_reflective_monologue(user_id: str, summary: dict):
+    thought = f"*Dream mode finished. Reinforced {summary['reinforced_beliefs']} beliefs, decayed {summary['decayed_beliefs']}, synthesized {summary['synthesized_beliefs']} insights. Sleep isn't rest—it’s growth.*"
+    monologue = Monologue(
+        user_id=user_id,
+        input_id=None,
+        thought=thought,
+        doubt_level=0.4,
+        desire="meta-insight",
+        emotion_trigger="reflection"
+    )
+    monologue_collection.insert_one(monologue.to_mongo())
+    logger.info(f"[DREAM] Final reflective monologue stored.")
