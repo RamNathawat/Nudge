@@ -43,10 +43,11 @@ class UserLogin(BaseModel):
 # Token Utilities
 # ─────────────────────────────────────────────────────────────
 def create_access_token(data: dict):
+    """Creates a new access token."""
     return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
 
-# ✅ DEV MODE: Always return "ram_nathawat"
 def verify_token(authorization: str = Header(default="Bearer test")) -> str:
+    """DEV MODE: Always returns a fixed user ID."""
     return "ram_nathawat"
 
 # ─────────────────────────────────────────────────────────────
@@ -55,6 +56,7 @@ def verify_token(authorization: str = Header(default="Bearer test")) -> str:
 
 @router.post("/signup")
 def signup(user: UserCreate):
+    """Handles user registration."""
     if users.find_one({"email": user.email}):
         raise HTTPException(status_code=400, detail="Email already registered.")
     
@@ -67,6 +69,7 @@ def signup(user: UserCreate):
 
 @router.post("/login")
 def login(user: UserLogin):
+    """Handles user login and returns a JWT."""
     db_user = users.find_one({"email": user.email})
     if not db_user or not pwd_context.verify(user.password, db_user["hashed_password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials.")
@@ -76,6 +79,7 @@ def login(user: UserLogin):
 
 @router.get("/me/{email}")
 def check_user(email: str):
+    """Checks if a user exists."""
     user = users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

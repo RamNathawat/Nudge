@@ -1,3 +1,5 @@
+// frontend/src/components/Chat.jsx
+
 import React, { useState, useEffect, useRef, useCallback } from "react";
 
 // --- Helper Components & Icons ---
@@ -97,7 +99,7 @@ function Chat() {
   const chatEndRef = useRef(null);
   const messagesContainerRef = useRef(null);
   const inputRef = useRef(null);
-  const baseUrl = import.meta.env.VITE_API_URL;
+  const baseUrl = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
   const initialLoadScrolled = useRef(false);
   const removeTraitsRegex = /\(Traits: \{[^}]+\}\)/g;
 
@@ -108,9 +110,8 @@ function Chat() {
     setIsFetchingMore(true);
     try {
       const token = localStorage.getItem("access_token");
-      const res = await fetch(`${baseUrl}/memory?offset=${currentOffset}&limit=${limit}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const url = `${baseUrl}/memory?offset=${currentOffset}&limit=${limit}`;
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
       const responseBody = await res.json();
       
       const fetchedMessages = responseBody?.memory?.messages || [];
@@ -280,15 +281,14 @@ function Chat() {
 
     try {
       const token = localStorage.getItem("access_token");
-      const res = await fetch(`${baseUrl}/chat`, {
+      const url = `${baseUrl}/chat`;
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ message: userMsg.text, reply_to_id: userMsg.replyTo }),
       });
       const data = await res.json();
       
-      // *** THIS IS THE FIX ***
-      // Safely handle cases where data.response might be missing or not a string
       const cleanedResponse = (data.response || "").replace(removeTraitsRegex, '').trim();
 
       setMessages((m) => m.map(msg => msg.id === tempAiId ? { ...msg, text: cleanedResponse, id: data.ai_message_id || `ai-${Date.now()}`} : msg));
@@ -517,4 +517,3 @@ function Chat() {
 }
 
 export default Chat;
-

@@ -1,30 +1,55 @@
-// vite.config.js
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
 
+// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      // Proxy requests that start with '/memory' to your backend
-      // Adjust this if your API endpoints have a different common prefix
-      '/memory': {
-        target: 'http://127.0.0.1:8000', // Your backend server address
-        changeOrigin: true, // Needed for CORS to work correctly
-        secure: false, // Set to true if your backend uses HTTPS
-      },
-      // If you have other API endpoints (e.g., /auth, /chat), add them here:
+      // This tells Vite to forward any request that starts with /auth
+      // to your backend server running on http://localhost:8000
       '/auth': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://localhost:8000',
         changeOrigin: true,
-        secure: false,
       },
+      // You can add other backend routes here if needed
+      // For example, if you have /chat, /memory, etc. at the root
       '/chat': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://localhost:8000',
         changeOrigin: true,
-        secure: false,
       },
-      // Add any other specific backend endpoints here if they don't fall under a common prefix
+      '/debug_nemo_mind': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/online_search': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/deep_research': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/memory': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+       '/traits': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+       '/reset-memory': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+       '/reset-traits': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+       '/safe-space-mode': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     }
   }
-});
+})

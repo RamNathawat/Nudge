@@ -11,7 +11,8 @@ function Signup({ onSwitch }) {
     console.log("[Debug] Signup attempt with:", { email, password: "***" });
 
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL}/auth/signup`, {
+      // CHANGE: Use a relative URL to engage the Vite proxy.
+      const res = await fetch('/auth/signup', {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),

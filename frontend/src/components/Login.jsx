@@ -12,8 +12,9 @@ function Login({ onLogin }) {
     console.log("[Debug] Login attempt:", { email, password: "****" });
 
     try {
+      // CHANGE: Use a relative URL to engage the Vite proxy.
       const response = await fetch(
-        `${import.meta.env.VITE_API_URL}/auth/login`,
+        '/auth/login',
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -27,6 +28,7 @@ function Login({ onLogin }) {
       try {
         data = await response.json();
       } catch (parseErr) {
+        // This error is expected if the server returns a non-JSON 404 page
         throw new Error("Invalid server response.");
       }
 

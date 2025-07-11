@@ -58,3 +58,4 @@ tenacity
 google-generativeai
 neo4j
 spacy
+google-search-results
