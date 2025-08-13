@@ -48,7 +48,9 @@ def create_access_token(data: dict):
 
 def verify_token(authorization: str = Header(default="Bearer test")) -> str:
     """DEV MODE: Always returns a fixed user ID."""
-    return "ram_nathawat"
+    # OLD, INCORRECT LINE:
+    # return "ram_nathawat"
+    return "6842dcab5594d75b23a42365"
 
 # ─────────────────────────────────────────────────────────────
 # Auth Routes

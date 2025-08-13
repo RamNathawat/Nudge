@@ -20,6 +20,7 @@ class Orchestrator:
     A meta-agent that deconstructs complex, multi-domain problems and
     orchestrates other AI agents to learn the required knowledge and
     synthesize a solution.
+    VERSION 4: Implements a more flexible 'mastery' check based on shared concepts.
     """
     def __init__(self):
         self.db_connector = graph_db_connector
@@ -27,10 +28,8 @@ class Orchestrator:
     def _identify_knowledge_domains(self, question: str) -> list:
         """
         Uses an LLM to identify the necessary knowledge domains for a question.
-        Includes a robust fallback to keyword/entity extraction if the LLM fails.
         """
         try:
-            # First, attempt the intelligent LLM-based approach
             prompt = f"""
             Analyze the following question and identify the distinct, high-level fields of knowledge required to answer it.
             For example, for "How can quantum mechanics explain consciousness?", the domains are ["Quantum Mechanics", "Neuroscience", "Philosophy of Mind"].
@@ -43,22 +42,18 @@ class Orchestrator:
             match = re.search(r'\[.*?\]', response_str)
             if match:
                 domains = eval(match.group(0))
-                if domains: # Check if the list is not empty
+                if domains:
                     logger.info(f"Orchestrator successfully identified domains via LLM: {domains}")
                     return domains
         except Exception as e:
             logger.error(f"Orchestrator: LLM-based domain identification failed: {e}. Proceeding to fallback.")
 
-        # --- FALLBACK LOGIC ---
-        # If the LLM fails, extract capitalized words and quoted phrases as a backup
         logger.warning("Falling back to keyword-based domain extraction.")
-        # Find all words that start with a capital letter or phrases in quotes
         capitalized_words = re.findall(r'\b[A-Z][a-zA-Z]*\b', question)
         quoted_phrases = re.findall(r"'(.*?)'", question)
         
         fallback_domains = capitalized_words + quoted_phrases
-        # Clean up and remove duplicates
-        unique_domains = list(dict.fromkeys(d.strip() for d in fallback_domains if len(d) > 2)) # Avoid short words
+        unique_domains = list(dict.fromkeys(d.strip() for d in fallback_domains if len(d) > 2))
         
         if unique_domains:
             logger.info(f"Orchestrator identified domains via fallback: {unique_domains}")
@@ -66,18 +61,45 @@ class Orchestrator:
         else:
             return []
 
-    def _is_topic_mastered(self, topic: str) -> bool:
-        """Checks the knowledge graph to see if a topic is sufficiently learned."""
-        query = "MATCH (t:Topic {name: $topic}) OPTIONAL MATCH (t)<-[]-(n) RETURN t, count(n) AS connections"
+    def _is_topic_mastered(self, topic: str, context_domains: list = None) -> bool:
+        """
+        Checks if a topic is sufficiently learned.
+        For synthesis tasks, mastery is defined by having a sufficient number
+        of shared conceptual neighbors with other topics in the context.
+        """
+        if context_domains and len(context_domains) > 1:
+            other_domains = [d for d in context_domains if d != topic]
+            if not other_domains:
+                pass
+            else:
+                query = """
+                MATCH (t1:Topic {name: $topic})--(neighbor)
+                MATCH (t2:Topic)--(neighbor)
+                WHERE t2.name IN $other_domains
+                RETURN count(DISTINCT neighbor) AS shared_neighbors
+                """
+                try:
+                    results = self.db_connector.run_query(query, parameters={"topic": topic, "other_domains": other_domains})
+                    if results and results[0]["shared_neighbors"] >= 2:
+                        logger.info(f"✅ Orchestrator: Topic '{topic}' is considered mastered for synthesis (found {results[0]['shared_neighbors']} shared neighbors).")
+                        return True
+                    else:
+                        logger.warning(f"Orchestrator: Topic '{topic}' is not yet mastered for synthesis. Shared neighbors: {results[0]['shared_neighbors'] if results else 0}.")
+                        return False
+                except Exception as e:
+                    logger.error(f"Failed to check mastery path for topic '{topic}': {e}")
+                    return False
+
+        fallback_query = "MATCH (t:Topic {name: $topic}) OPTIONAL MATCH (t)<--(n) RETURN count(n) AS connections"
         try:
-            results = self.db_connector.run_query(query, parameters={"topic": topic})
-            if results and results[0]["connections"] >= 50:
-                logger.info(f"Orchestrator: Topic '{topic}' is considered mastered.")
+            results = self.db_connector.run_query(fallback_query, parameters={"topic": topic})
+            if results and results[0]["connections"] >= 5:
+                logger.info(f"✅ Orchestrator: Topic '{topic}' is considered mastered (found {results[0]['connections']} connections).")
                 return True
         except Exception as e:
-            logger.error(f"Failed to check mastery for topic '{topic}': {e}")
-        
-        logger.warning(f"Orchestrator: Topic '{topic}' is not yet mastered.")
+            logger.error(f"Failed to check fallback mastery for topic '{topic}': {e}")
+
+        logger.warning(f"Orchestrator: Topic '{topic}' is not yet mastered (fallback check).")
         return False
 
     def solve_multi_domain_problem(self, user_id: str, question: str, domains_override: list = None) -> str:
@@ -90,10 +112,25 @@ class Orchestrator:
 
         logger.info(f"Orchestrator: Using required domains: {domains}")
         
-        unmastered_domains = [d for d in domains if not self._is_topic_mastered(d)]
+        unmastered_domains = [d for d in domains if not self._is_topic_mastered(d, context_domains=domains)]
+        
         if unmastered_domains:
-            for domain in unmastered_domains:
-                goal_manager.create_goal(user_id=user_id, goal_text=f"Master Topic: {domain}", goal_type="deep_learning")
+            goal_text = f"Synthesize a coherent insight connecting the following domains: {', '.join(unmastered_domains)}. This is to answer the user's question: '{question}'"
+            
+            existing_goal = goal_manager.goals_collection.find_one({
+                "user_id": user_id,
+                "goal": goal_text,
+                "status": {"$in": ["in_progress", "failed", "paused"]}
+            })
+
+            if existing_goal:
+                logger.warning(f"A goal for this synthesis already exists (status: {existing_goal.get('status')}). Not creating a new one.")
+            else:
+                 goal_manager.create_goal(
+                    user_id=user_id,
+                    goal_text=goal_text,
+                    goal_type="deep_learning"
+                )
             
             if not pending_questions_collection.find_one({"original_question": question, "status": "pending_learning"}):
                 pending_questions_collection.insert_one({
@@ -102,7 +139,7 @@ class Orchestrator:
                     "created_at": datetime.utcnow()
                 })
             domains_to_learn = ', '.join(unmastered_domains)
-            return f"That's a fascinating question. I need to do some research on '{domains_to_learn}'. I'll get back to you once I've synthesized my findings."
+            return f"That's a fascinating question that connects multiple fields. I need to do some deep research on '{domains_to_learn}' before I can give you a thoughtful answer. Please ask me again in about 15-20 minutes."
 
         if len(domains) > 1:
             return thinker_agent.generate_cross_domain_synthesis(user_id, domains)
@@ -117,7 +154,7 @@ class Orchestrator:
 
         for question_doc in pending_questions:
             required_domains = question_doc.get("required_domains", [])
-            all_mastered = all(self._is_topic_mastered(domain) for domain in required_domains)
+            all_mastered = all(self._is_topic_mastered(domain, context_domains=required_domains) for domain in required_domains)
 
             if all_mastered:
                 logger.info(f"All domains for question '{question_doc['_id']}' are now mastered. Answering proactively.")

@@ -13,6 +13,7 @@ class ThinkerAgent:
     """
     An agent capable of Level 4 Synthesis, now with a more robust
     Internal Dialectic to ensure coherent idea generation.
+    VERSION 2: Handles N-Domain Synthesis.
     """
     def __init__(self, coherence_threshold=7, max_refinement_cycles=2):
         self.db_connector = graph_db_connector
@@ -34,7 +35,6 @@ class ThinkerAgent:
     def _critique_hypothesis(self, hypothesis: str) -> Tuple[bool, str]:
         """
         The "Logician" persona. Critiques a hypothesis for coherence and returns a score.
-        This version has more robust parsing.
         """
         prompt = f"""
         You are a skeptical, rigorous logician. Analyze the following creative hypothesis.
@@ -53,7 +53,6 @@ class ThinkerAgent:
         response = generate_gemini_response(prompt)
         
         try:
-            # More robust regex to handle variations in whitespace and capitalization
             critique_match = re.search(r"Critique:\s*(.*)", response, re.DOTALL | re.IGNORECASE)
             score_match = re.search(r"Coherence Score:\s*(\d+)", response, re.IGNORECASE)
             
@@ -66,7 +65,6 @@ class ThinkerAgent:
             
         except Exception as e:
             logger.error(f"Could not parse logician's critique from response '{response}': {e}")
-            # Fallback if parsing fails completely
             return False, "Failed to parse the critique due to an unexpected format."
 
     def _refine_hypothesis(self, original_hypothesis: str, critique: str) -> str:
@@ -83,42 +81,27 @@ class ThinkerAgent:
         """
         return generate_gemini_response(prompt)
 
-    def _select_best_pair_for_synthesis(self, domains: List[str]) -> Tuple[str, str]:
-        """Uses an LLM to select the two most promising domains for creative synthesis."""
-        if len(domains) < 2:
-            return None, None
-        if len(domains) == 2:
-            return domains[0], domains[1]
-            
-        prompt = f"From {domains}, select the two most promising for a creative synthesis. Return as a Python list."
-        response_str = generate_gemini_response(prompt)
-        try:
-            match = re.search(r'\[.*?\]', response_str)
-            pair = eval(match.group(0)) if match else []
-            if len(pair) == 2:
-                return pair[0], pair[1]
-        except:
-            pass
-        # Fallback to the first two if LLM fails
-        return domains[0], domains[1]
-
     def generate_cross_domain_synthesis(self, user_id: str, domains: List[str]) -> str:
         """
         The main creative function with the "Internal Dialectic" refinement loop.
+        MODIFIED: Now handles N domains instead of just a pair.
         """
-        topic_a, topic_b = self._select_best_pair_for_synthesis(domains)
-        if not topic_a or not topic_b:
+        if not domains or len(domains) < 2:
             return "I need at least two mastered topics to generate a meaningful synthesis."
 
-        logger.info(f"🎨 [Thinker Agent] Beginning Internal Dialectic for '{topic_a}' and '{topic_b}'.")
+        logger.info(f"🎨 [Thinker Agent] Beginning Internal Dialectic for domains: {', '.join(domains)}.")
         
-        concepts_a = self._get_core_concepts(topic_a)
-        concepts_b = self._get_core_concepts(topic_b)
+        concepts_by_domain = {}
+        for domain in domains:
+            concepts = self._get_core_concepts(domain)
+            if not concepts:
+                 return f"My apologies, I haven't mastered '{domain}' enough to form a novel connection yet."
+            concepts_by_domain[domain] = concepts
 
-        if not concepts_a or not concepts_b:
-            return f"My apologies, I haven't mastered '{topic_a}' or '{topic_b}' enough to form a novel connection yet."
-
-        muse_prompt = f"Generate a novel hypothesis connecting '{topic_a}' (concepts: {', '.join(concepts_a)}) and '{topic_b}' (concepts: {', '.join(concepts_b)}). Give it a creative name and explanation."
+        concepts_by_domain_str = "; ".join([f"{domain}: {', '.join(con)}" for domain, con in concepts_by_domain.items()])
+        
+        muse_prompt = f"Generate a novel hypothesis connecting the following domains: {', '.join(domains)}. Use the core concepts from each domain to build your synthesis. The core concepts are: {concepts_by_domain_str}. Give it a creative name and a detailed explanation."
+        
         current_hypothesis = generate_gemini_response(muse_prompt)
         if not current_hypothesis:
             return "My 'muse' seems to be on a break. I couldn't generate an initial idea."
@@ -128,12 +111,17 @@ class ThinkerAgent:
             
             if is_coherent:
                 belief_text = f"Prometheus Contemplation: {current_hypothesis}"
-                belief_engine.form_belief(user_id=user_id, belief_text=belief_text, source="thinker_agent_synthesis", confidence=0.7, topic_tags=[topic_a.lower(), topic_b.lower(), "synthesis"])
+                belief_engine.form_belief(
+                    user_id=user_id, 
+                    belief_text=belief_text, 
+                    source="thinker_agent_synthesis", 
+                    confidence=0.7, 
+                    topic_tags=[d.lower() for d in domains] + ["synthesis"]
+                )
                 logger.info(f"🎨 [Thinker Agent] Coherent idea accepted after {i} refinements.")
-                return f"After some internal debate, I've developed a coherent hypothesis connecting '{topic_a}' and '{topic_b}':\n\n{current_hypothesis}"
+                return f"After some internal debate, I've developed a coherent hypothesis connecting '{', '.join(domains)}':\n\n{current_hypothesis}"
             
             if "Failed to parse" in critique:
-                # If parsing fails, we can't refine, so we must exit.
                 logger.error("Critique parsing failed, exiting refinement loop.")
                 break
 
@@ -141,6 +129,6 @@ class ThinkerAgent:
             current_hypothesis = self._refine_hypothesis(current_hypothesis, critique)
 
         logger.error("Idea failed to become coherent after all refinement cycles.")
-        return f"I generated an idea connecting '{topic_a}' and '{topic_b}', but even after several rounds of internal critique, I couldn't make it logically sound. My last attempt was flagged because: \"{critique}\"."
+        return f"I generated an idea connecting '{', '.join(domains)}', but after some internal critique, I couldn't make it logically sound. My last attempt was flagged because: \"{critique}\"."
 
 thinker_agent = ThinkerAgent()
